@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MyCast Web Receiver</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #070a12;
+      --surface: rgba(17, 24, 39, 0.78);
+      --border: rgba(255, 255, 255, 0.12);
+      --accent: #6366f1;
+      --accent-2: #3b82f6;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --danger: #ef4444;
+      --success: #10b981;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      user-select: none;
+    }
+
+    .ambient {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 40px 56px;
+      background:
+        radial-gradient(circle at 18% 25%, rgba(99, 102, 241, 0.24), transparent 45%),
+        radial-gradient(circle at 82% 75%, rgba(59, 130, 246, 0.20), transparent 45%),
+        radial-gradient(circle at 50% 50%, rgba(16, 185, 129, 0.08), transparent 60%),
+        #070a12;
+      transition: opacity 0.35s ease;
+      z-index: 10;
+    }
+
+    .ambient.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .top-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 700;
+      font-size: 20px;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-badge {
+      width: 38px;
+      height: 38px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      display: grid;
+      place-items: center;
+      box-shadow: 0 8px 24px rgba(99, 102, 241, 0.35);
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 16px;
+      border-radius: 999px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      backdrop-filter: blur(16px);
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: #f59e0b;
+      box-shadow: 0 0 12px #f59e0b;
+    }
+
+    .dot.connected {
+      background: var(--success);
+      box-shadow: 0 0 12px var(--success);
+    }
+
+    .dot.error {
+      background: var(--danger);
+      box-shadow: 0 0 12px var(--danger);
+    }
+
+    .center-hero {
+      max-width: 720px;
+      margin: auto 0;
+    }
+
+    .clock {
+      font-size: clamp(56px, 9vw, 108px);
+      font-weight: 700;
+      letter-spacing: -0.04em;
+      line-height: 1;
+      background: linear-gradient(180deg, #ffffff 0%, #cbd5e1 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .date-line {
+      margin-top: 10px;
+      font-size: clamp(18px, 2.2vw, 24px);
+      color: var(--muted);
+      font-weight: 400;
+    }
+
+    .info-card {
+      margin-top: 32px;
+      display: inline-flex;
+      flex-direction: column;
+      gap: 14px;
+      padding: 20px 24px;
+      border-radius: 16px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      backdrop-filter: blur(20px);
+      max-width: 100%;
+    }
+
+    .info-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      font-size: 14px;
+      color: #cbd5e1;
+    }
+
+    .name-input {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      color: white;
+      border-radius: 8px;
+      padding: 6px 12px;
+      font-size: 14px;
+      font-weight: 600;
+      outline: none;
+      width: 220px;
+    }
+
+    .name-input:focus {
+      border-color: var(--accent);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text);
+      padding: 8px 14px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s ease, transform 0.1s ease;
+    }
+
+    .btn:hover {
+      background: rgba(255, 255, 255, 0.15);
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      border-color: transparent;
+    }
+
+    .btn-primary:hover {
+      filter: brightness(1.1);
+    }
+
+    .btn-danger {
+      background: rgba(239, 68, 68, 0.85);
+      border-color: transparent;
+    }
+
+    .btn-danger:hover {
+      background: #dc2626;
+    }
+
+    .bottom-hint {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .player-stage {
+      position: fixed;
+      inset: 0;
+      background: #000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
+    }
+
+    .player-stage.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .player-stage.hide-cursor {
+      cursor: none;
+    }
+
+    #remoteVideo {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #000;
+    }
+
+    #remoteVideo.fill {
+      object-fit: cover;
+    }
+
+    .unmute-toast {
+      position: fixed;
+      top: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(99, 102, 241, 0.94);
+      color: white;
+      padding: 10px 20px;
+      border-radius: 999px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+      z-index: 40;
+      display: none;
+    }
+
+    .unmute-toast.visible {
+      display: block;
+    }
+
+    .hud {
+      position: fixed;
+      left: 50%;
+      bottom: 28px;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 16px;
+      border-radius: 16px;
+      background: rgba(15, 23, 42, 0.84);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      backdrop-filter: blur(20px);
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.55);
+      z-index: 30;
+      transition: opacity 0.25s ease, transform 0.25s ease;
+      max-width: calc(100vw - 32px);
+      flex-wrap: wrap;
+    }
+
+    .hud.hidden {
+      opacity: 0;
+      transform: translateX(-50%) translateY(14px);
+      pointer-events: none;
+    }
+
+    .live-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      padding-right: 8px;
+      border-right: 1px solid rgba(255, 255, 255, 0.14);
+    }
+
+    .live-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--danger);
+      box-shadow: 0 0 10px var(--danger);
+    }
+
+    .volume-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    input[type="range"] {
+      accent-color: var(--accent);
+      width: 88px;
+      cursor: pointer;
+    }
+
+    .stats-overlay {
+      position: fixed;
+      top: 24px;
+      left: 24px;
+      padding: 14px 18px;
+      border-radius: 12px;
+      background: rgba(9, 13, 24, 0.88);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      backdrop-filter: blur(14px);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.65;
+      color: #e2e8f0;
+      z-index: 35;
+      display: none;
+    }
+
+    .stats-overlay.visible {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div id="ambient" class="ambient">
+    <div class="top-bar">
+      <div class="brand">
+        <div class="brand-badge">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6"/>
+            <path d="M2 12a9 9 0 0 1 8 8"/>
+            <path d="M2 16a5 5 0 0 1 4 4"/>
+            <line x1="2" y1="20" x2="2.01" y2="20"/>
+          </svg>
+        </div>
+        <span>MyCast Web Receiver</span>
+      </div>
+      <div class="status-pill">
+        <span id="connDot" class="dot"></span>
+        <span id="connText">Connecting to host...</span>
+      </div>
+    </div>
+
+    <div class="center-hero">
+      <div id="clock" class="clock">00:00</div>
+      <div id="dateLine" class="date-line">Ready to cast</div>
+
+      <div class="info-card">
+        <div class="info-row">
+          <span>Receiver Name:</span>
+          <input id="nameInput" class="name-input" type="text" maxlength="36" />
+          <button id="saveNameBtn" class="btn">Rename</button>
+        </div>
+        <div class="info-row">
+          <span>Select this browser in the MyCast desktop app to start mirroring instantly.</span>
+        </div>
+        <div class="info-row">
+          <button id="standbyFullscreenBtn" class="btn btn-primary">Enter Fullscreen Standby</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="bottom-hint">
+      <span>Zero-install Chromecast Web Fallback</span>
+      <span id="hostBadge">WebSocket: initializing</span>
+    </div>
+  </div>
+
+  <div id="playerStage" class="player-stage">
+    <video id="remoteVideo" autoplay playsinline></video>
+    <div id="unmuteToast" class="unmute-toast">Browser muted autoplay audio — Click here to unmute</div>
+
+    <div id="statsOverlay" class="stats-overlay"></div>
+
+    <div id="hud" class="hud">
+      <div class="live-badge">
+        <span class="live-dot"></span>
+        <span id="senderLabel">LIVE</span>
+      </div>
+      <div class="volume-wrap">
+        <button id="muteBtn" class="btn">Mute</button>
+        <input id="volumeSlider" type="range" min="0" max="1" step="0.05" value="1" />
+      </div>
+      <button id="fitBtn" class="btn">Fill Screen</button>
+      <button id="statsBtn" class="btn">Stats</button>
+      <button id="fullscreenBtn" class="btn">Fullscreen</button>
+      <button id="disconnectBtn" class="btn btn-danger">Disconnect</button>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const ambientEl = document.getElementById('ambient');
+      const playerStageEl = document.getElementById('playerStage');
+      const remoteVideo = document.getElementById('remoteVideo');
+      const unmuteToast = document.getElementById('unmuteToast');
+      const hudEl = document.getElementById('hud');
+      const statsOverlay = document.getElementById('statsOverlay');
+      const connDot = document.getElementById('connDot');
+      const connText = document.getElementById('connText');
+      const hostBadge = document.getElementById('hostBadge');
+      const clockEl = document.getElementById('clock');
+      const dateLineEl = document.getElementById('dateLine');
+      const nameInput = document.getElementById('nameInput');
+      const saveNameBtn = document.getElementById('saveNameBtn');
+      const standbyFullscreenBtn = document.getElementById('standbyFullscreenBtn');
+      const senderLabel = document.getElementById('senderLabel');
+      const muteBtn = document.getElementById('muteBtn');
+      const volumeSlider = document.getElementById('volumeSlider');
+      const fitBtn = document.getElementById('fitBtn');
+      const statsBtn = document.getElementById('statsBtn');
+      const fullscreenBtn = document.getElementById('fullscreenBtn');
+      const disconnectBtn = document.getElementById('disconnectBtn');
+
+      function defaultBrowserName() {
+        const ua = navigator.userAgent;
+        let browser = 'Browser';
+        if (ua.includes('Edg/')) browser = 'Edge';
+        else if (ua.includes('Chrome/')) browser = 'Chrome';
+        else if (ua.includes('Firefox/')) browser = 'Firefox';
+        else if (ua.includes('Safari/')) browser = 'Safari';
+        return browser + ' Display';
+      }
+
+      let receiverName = localStorage.getItem('mycast_web_name') || defaultBrowserName();
+      nameInput.value = receiverName;
+
+      function updateClock() {
+        const now = new Date();
+        clockEl.textContent = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        dateLineEl.textContent = now.toLocaleDateString([], {
+          weekday: 'long',
+          month: 'long',
+          day: 'numeric',
+        });
+      }
+      updateClock();
+      setInterval(updateClock, 1000);
+
+      let ws = null;
+      let pc = null;
+      let activeSessionId = null;
+      let activeSenderName = '';
+      let statsTimer = null;
+      let hudHideTimer = null;
+      let showStats = false;
+      let fillMode = false;
+      let prevBytes = 0;
+      let prevTs = 0;
+      let pendingIce = [];
+
+      function showHud() {
+        hudEl.classList.remove('hidden');
+        playerStageEl.classList.remove('hide-cursor');
+        clearTimeout(hudHideTimer);
+        if (activeSessionId) {
+          hudHideTimer = setTimeout(() => {
+            hudEl.classList.add('hidden');
+            playerStageEl.classList.add('hide-cursor');
+          }, 3000);
+        }
+      }
+
+      playerStageEl.addEventListener('mousemove', showHud);
+      playerStageEl.addEventListener('mousedown', showHud);
+
+      function setConnState(state, text) {
+        connDot.className = 'dot' + (state === 'connected' ? ' connected' : state === 'error' ? ' error' : '');
+        connText.textContent = text;
+      }
+
+      function sendWs(payload) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(payload));
+        }
+      }
+
+      function cleanupStream(notifySender, reason) {
+        if (notifySender && activeSessionId) {
+          sendWs({ type: 'cast-stop', sessionId: activeSessionId, reason: reason || 'Receiver stopped' });
+        }
+        sendWs({ type: 'web-receiver-meta', name: receiverName, status: 'idle' });
+        if (statsTimer) {
+          clearInterval(statsTimer);
+          statsTimer = null;
+        }
+        if (pc) {
+          try { pc.close(); } catch {}
+          pc = null;
+        }
+        remoteVideo.srcObject = null;
+        activeSessionId = null;
+        activeSenderName = '';
+        pendingIce = [];
+        prevBytes = 0;
+        prevTs = 0;
+        unmuteToast.classList.remove('visible');
+        playerStageEl.classList.remove('active', 'hide-cursor');
+        ambientEl.classList.remove('hidden');
+        statsOverlay.classList.remove('visible');
+        showStats = false;
+      }
+
+      async function tryStartPlayback() {
+        remoteVideo.volume = parseFloat(volumeSlider.value);
+        remoteVideo.muted = false;
+        try {
+          await remoteVideo.play();
+          unmuteToast.classList.remove('visible');
+          muteBtn.textContent = 'Mute';
+        } catch {
+          // Browsers often block unmuted autoplay without prior user gesture; fall back to muted autoplay
+          remoteVideo.muted = true;
+          muteBtn.textContent = 'Unmute';
+          try {
+            await remoteVideo.play();
+          } catch {}
+          unmuteToast.classList.add('visible');
+        }
+      }
+
+      unmuteToast.addEventListener('click', () => {
+        remoteVideo.muted = false;
+        remoteVideo.volume = parseFloat(volumeSlider.value) || 1;
+        muteBtn.textContent = 'Mute';
+        unmuteToast.classList.remove('visible');
+        remoteVideo.play().catch(() => {});
+      });
+
+      function startStatsPolling() {
+        if (statsTimer) clearInterval(statsTimer);
+        statsTimer = setInterval(async () => {
+          if (!pc) return;
+          try {
+            const report = await pc.getStats();
+            let width = 0;
+            let height = 0;
+            let fps = 0;
+            let bytes = 0;
+            let ts = 0;
+            let jitterMs = 0;
+            let codec = '';
+
+            report.forEach((stat) => {
+              if (stat.type === 'inbound-rtp' && stat.kind === 'video') {
+                width = stat.frameWidth || width;
+                height = stat.frameHeight || height;
+                fps = stat.framesPerSecond || fps;
+                bytes = stat.bytesReceived || 0;
+                ts = stat.timestamp || 0;
+                jitterMs = stat.jitter ? Math.round(stat.jitter * 1000) : 0;
+                if (stat.codecId && report.get(stat.codecId)) {
+                  codec = report.get(stat.codecId).mimeType || '';
+                }
+              }
+            });
+
+            let mbps = 0;
+            if (prevTs > 0 && ts > prevTs && bytes >= prevBytes) {
+              mbps = ((bytes - prevBytes) * 8) / ((ts - prevTs) * 1000);
+            }
+            prevBytes = bytes;
+            prevTs = ts;
+
+            const resLabel = width && height ? width + 'x' + height : 'Connecting';
+            senderLabel.textContent =
+              'LIVE • ' + activeSenderName + ' • ' + resLabel + (fps ? ' ' + Math.round(fps) + 'fps' : '') + ' • ' + mbps.toFixed(1) + ' Mbps';
+
+            if (showStats) {
+              statsOverlay.innerHTML =
+                'Sender: ' + activeSenderName + '<br>' +
+                'Resolution: ' + resLabel + '<br>' +
+                'Frame Rate: ' + (fps ? Math.round(fps) + ' fps' : '--') + '<br>' +
+                'Bitrate: ' + mbps.toFixed(2) + ' Mbps<br>' +
+                'Jitter: ' + jitterMs + ' ms<br>' +
+                'Codec: ' + (codec || 'auto');
+            }
+          } catch {}
+        }, 1000);
+      }
+
+      async function handleSignalingMessage(msg) {
+        if (msg.type === 'registered') {
+          hostBadge.textContent = 'Host: ' + (msg.hostName || location.host);
+          setConnState('connected', 'Connected to ' + (msg.hostName || location.hostname) + ' — Ready');
+          return;
+        }
+
+        if (msg.type === 'cast-request') {
+          if (activeSessionId && activeSessionId !== msg.sessionId) {
+            cleanupStream(false);
+          }
+          activeSessionId = msg.sessionId;
+          activeSenderName = msg.senderName || 'Remote PC';
+          senderLabel.textContent = 'Connecting • ' + activeSenderName;
+
+          pc = new RTCPeerConnection({ iceServers: [] });
+          const remoteStream = new MediaStream();
+          remoteVideo.srcObject = remoteStream;
+
+          pc.ontrack = (event) => {
+            try {
+              if (event.receiver && 'playoutDelayHint' in event.receiver) {
+                event.receiver.playoutDelayHint = 0;
+              }
+            } catch {}
+            if (event.streams && event.streams[0]) {
+              remoteVideo.srcObject = event.streams[0];
+            } else {
+              remoteStream.addTrack(event.track);
+            }
+            tryStartPlayback();
+          };
+
+          pc.onicecandidate = (event) => {
+            if (event.candidate && activeSessionId) {
+              sendWs({
+                type: 'webrtc-ice',
+                sessionId: activeSessionId,
+                candidate: event.candidate,
+              });
+            }
+          };
+
+          pc.onconnectionstatechange = () => {
+            if (!pc) return;
+            if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+              cleanupStream(true, 'WebRTC connection closed');
+            }
+          };
+
+          ambientEl.classList.add('hidden');
+          playerStageEl.classList.add('active');
+          showHud();
+          startStatsPolling();
+          sendWs({ type: 'cast-accepted', sessionId: activeSessionId });
+          sendWs({ type: 'web-receiver-meta', name: receiverName, status: 'receiving' });
+          return;
+        }
+
+        if (!activeSessionId || msg.sessionId !== activeSessionId) return;
+
+        if (msg.type === 'webrtc-offer' && pc) {
+          await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+          while (pendingIce.length > 0) {
+            const c = pendingIce.shift();
+            await pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
+          }
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          sendWs({
+            type: 'webrtc-answer',
+            sessionId: activeSessionId,
+            sdp: pc.localDescription,
+          });
+        } else if (msg.type === 'webrtc-ice' && pc && msg.candidate) {
+          if (pc.remoteDescription) {
+            await pc.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
+          } else {
+            pendingIce.push(msg.candidate);
+          }
+        } else if (msg.type === 'cast-stop') {
+          cleanupStream(false);
+        }
+      }
+
+      function connectWebSocket() {
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const url = proto + '//' + location.host + '/ws?role=web-receiver&name=' + encodeURIComponent(receiverName);
+        setConnState('connecting', 'Connecting to MyCast host...');
+        ws = new WebSocket(url);
+
+        ws.onopen = () => {
+          sendWs({ type: 'web-receiver-meta', name: receiverName, status: 'idle' });
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            handleSignalingMessage(msg).catch((err) => {
+              console.error('Signaling error:', err);
+            });
+          } catch {}
+        };
+
+        ws.onclose = () => {
+          setConnState('error', 'Disconnected — reconnecting...');
+          cleanupStream(false);
+          setTimeout(connectWebSocket, 2000);
+        };
+      }
+
+      saveNameBtn.addEventListener('click', () => {
+        const val = nameInput.value.trim();
+        if (!val) return;
+        receiverName = val;
+        localStorage.setItem('mycast_web_name', receiverName);
+        sendWs({
+          type: 'web-receiver-meta',
+          name: receiverName,
+          status: activeSessionId ? 'receiving' : 'idle',
+        });
+      });
+
+      standbyFullscreenBtn.addEventListener('click', () => {
+        if (!document.fullscreenElement) {
+          document.documentElement.requestFullscreen().catch(() => {});
+        } else {
+          document.exitFullscreen().catch(() => {});
+        }
+      });
+
+      muteBtn.addEventListener('click', () => {
+        remoteVideo.muted = !remoteVideo.muted;
+        muteBtn.textContent = remoteVideo.muted ? 'Unmute' : 'Mute';
+        if (!remoteVideo.muted) unmuteToast.classList.remove('visible');
+      });
+
+      volumeSlider.addEventListener('input', () => {
+        const vol = parseFloat(volumeSlider.value);
+        remoteVideo.volume = vol;
+        if (vol > 0 && remoteVideo.muted) {
+          remoteVideo.muted = false;
+          muteBtn.textContent = 'Mute';
+          unmuteToast.classList.remove('visible');
+        }
+      });
+
+      fitBtn.addEventListener('click', () => {
+        fillMode = !fillMode;
+        remoteVideo.classList.toggle('fill', fillMode);
+        fitBtn.textContent = fillMode ? 'Fit Screen' : 'Fill Screen';
+      });
+
+      statsBtn.addEventListener('click', () => {
+        showStats = !showStats;
+        statsOverlay.classList.toggle('visible', showStats);
+      });
+
+      fullscreenBtn.addEventListener('click', () => {
+        if (!document.fullscreenElement) {
+          document.documentElement.requestFullscreen().catch(() => {});
+        } else {
+          document.exitFullscreen().catch(() => {});
+        }
+      });
+
+      disconnectBtn.addEventListener('click', () => {
+        cleanupStream(true, 'Disconnected by browser receiver');
+      });
+
+      connectWebSocket();
+    })();
+  </script>
+</body>
+</html>

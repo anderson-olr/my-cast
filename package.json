@@ -1,0 +1,49 @@
+{
+  "name": "my-cast",
+  "version": "1.0.0",
+  "description": "Chromecast-style LAN screen, window, and system audio casting for PCs with zero-install browser fallback",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"wait-on tcp:127.0.0.1:5173 && npm run build:electron && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
+    "build:electron": "tsc -p tsconfig.node.json",
+    "build:renderer": "tsc --noEmit && vite build",
+    "build": "npm run build:renderer && npm run build:electron",
+    "start": "npm run build && electron .",
+    "pack": "npm run build && electron-builder --dir"
+  },
+  "build": {
+    "appId": "com.mycast.desktop",
+    "productName": "MyCast",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "public/**/*"
+    ],
+    "win": {
+      "target": "nsis"
+    }
+  },
+  "dependencies": {
+    "lucide-react": "^0.460.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/ws": "^8.5.13",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.1",
+    "wait-on": "^8.0.1"
+  }
+}
