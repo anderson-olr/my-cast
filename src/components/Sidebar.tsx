@@ -1,8 +1,8 @@
 import React from 'react';
-import { Cast, Globe, Lock, Settings, Tv } from 'lucide-react';
+import { Cast, Film, Globe, Lock, Settings, Tv } from 'lucide-react';
 import { SelfInfo } from '../types/mycast';
 
-export type NavTab = 'cast' | 'receiver' | 'web' | 'settings';
+export type NavTab = 'cast' | 'media' | 'receiver' | 'web' | 'settings';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -11,6 +11,7 @@ interface SidebarProps {
   peerCount: number;
   webReceiverCount: number;
   isCasting: boolean;
+  castMode?: 'screen' | 'media';
   isReceiving: boolean;
 }
 
@@ -21,12 +22,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   peerCount,
   webReceiverCount,
   isCasting,
+  castMode = 'screen',
   isReceiving,
 }) => {
   const statusLabel = isReceiving
     ? 'Receiving Cast'
     : isCasting
-      ? 'Casting Screen'
+      ? castMode === 'media'
+        ? 'Casting Media'
+        : 'Casting Screen'
       : 'Receiver Ready';
 
   return (
@@ -49,6 +53,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <Cast size={17} />
           <span>Cast Screen</span>
           {peerCount > 0 && <span className="nav-badge">{peerCount}</span>}
+        </button>
+
+        <button
+          className={`nav-item ${activeTab === 'media' ? 'active' : ''}`}
+          onClick={() => onSelectTab('media')}
+        >
+          <Film size={17} />
+          <span>Cast Media</span>
+          {isCasting && castMode === 'media' && <span className="nav-badge">LIVE</span>}
         </button>
 
         <button

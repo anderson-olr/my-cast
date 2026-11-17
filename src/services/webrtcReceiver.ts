@@ -4,6 +4,7 @@ export interface ReceiverCallbacks {
   onIncomingCast: (info: { sessionId: string; senderId?: string; senderName: string }) => void;
   onStream: (stream: MediaStream) => void;
   onStats: (stats: StreamStats) => void;
+  onSubtitleCue?: (text: string | null) => void;
   onCastEnded: (reason?: string) => void;
 }
 
@@ -119,6 +120,11 @@ export class WebRtcReceiverController {
       return;
     }
 
+    if (msg.type === 'subtitle-cue') {
+      this.callbacks.onSubtitleCue?.(msg.subtitleText ?? null);
+      return;
+    }
+
     if (msg.type === 'cast-stop') {
       this.cleanup(false, msg.reason);
     }
@@ -220,6 +226,7 @@ export class WebRtcReceiverController {
     this.pendingIce = [];
     this.prevBytes = 0;
     this.prevTs = 0;
+    this.callbacks.onSubtitleCue?.(null);
 
     if (hadSession) {
       this.callbacks.onCastEnded(reason);

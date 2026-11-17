@@ -1,12 +1,16 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import {
   AppConfig,
   DesktopSourceInfo,
   DiscoveredPeer,
   DisplayInfo,
+  MediaFileInfo,
   ReceiverStatus,
+  SavedFileResult,
+  SavedPlaylist,
   SelfInfo,
   SignalingMessage,
+  SubtitleFileInfo,
 } from './types';
 
 function subscribe<T>(channel: string, callback: (payload: T) => void): () => void {
@@ -52,6 +56,30 @@ const api = {
     subscribe<boolean>('fullscreen-changed', cb),
   onSelfInfoUpdated: (cb: (info: SelfInfo) => void) =>
     subscribe<SelfInfo>('self-info-updated', cb),
+  pickMediaFiles: (): Promise<MediaFileInfo[]> => ipcRenderer.invoke('pick-media-files'),
+  pickSubtitleFile: (): Promise<SubtitleFileInfo | null> =>
+    ipcRenderer.invoke('pick-subtitle-file'),
+  readSubtitleFile: (filePath: string): Promise<SubtitleFileInfo> =>
+    ipcRenderer.invoke('read-subtitle-file', filePath),
+  registerMediaFile: (filePath: string): Promise<string> =>
+    ipcRenderer.invoke('register-media-file', filePath),
+  getPlaylists: (): Promise<SavedPlaylist[]> => ipcRenderer.invoke('get-playlists'),
+  savePlaylists: (playlists: SavedPlaylist[]): Promise<SavedPlaylist[]> =>
+    ipcRenderer.invoke('save-playlists', playlists),
+  pickDirectory: (defaultPath?: string): Promise<string | null> =>
+    ipcRenderer.invoke('pick-directory', defaultPath),
+  saveScreenshot: (dataUrl: string, senderName?: string): Promise<SavedFileResult> =>
+    ipcRenderer.invoke('save-screenshot', dataUrl, senderName),
+  startRecordingFile: (
+    senderName?: string
+  ): Promise<{ recordingId: string; filePath: string; fileName: string }> =>
+    ipcRenderer.invoke('start-recording-file', senderName),
+  appendRecordingChunk: (recordingId: string, chunk: Uint8Array): Promise<void> =>
+    ipcRenderer.invoke('append-recording-chunk', recordingId, chunk),
+  finishRecordingFile: (recordingId: string): Promise<SavedFileResult> =>
+    ipcRenderer.invoke('finish-recording-file', recordingId),
+  openFolder: (targetPath: string): Promise<void> => ipcRenderer.invoke('open-folder', targetPath),
+  getPathForFile: (file: File): string => webUtils.getPathForFile(file),
 };
 
 contextBridge.exposeInMainWorld('mycast', api);

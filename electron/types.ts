@@ -13,6 +13,8 @@ export interface AppConfig {
   targetDisplayId: number | null;
   minimizeToTray: boolean;
   defaultQuality: QualityPreset;
+  recordingsDir: string;
+  screenshotsDir: string;
 }
 
 export type ReceiverStatus = 'idle' | 'casting' | 'receiving';
@@ -84,7 +86,8 @@ export type SignalingMessageType =
   | 'webrtc-offer'
   | 'webrtc-answer'
   | 'webrtc-ice'
-  | 'cast-stop';
+  | 'cast-stop'
+  | 'subtitle-cue';
 
 export interface SignalingMessage {
   type: SignalingMessageType;
@@ -96,4 +99,37 @@ export interface SignalingMessage {
   quality?: QualityPreset;
   sdp?: unknown;
   candidate?: unknown;
+  subtitleText?: string | null;
+}
+
+export interface MediaFileInfo {
+  path: string;
+  name: string;
+  size: number;
+}
+
+export interface SubtitleFileInfo {
+  path: string;
+  name: string;
+  content: string;
+}
+
+export interface SavedPlaylistItem {
+  id: string;
+  path: string;
+  name: string;
+  subtitlePath?: string;
+  subtitleName?: string;
+}
+
+export interface SavedPlaylist {
+  id: string;
+  name: string;
+  updatedAt: number;
+  items: SavedPlaylistItem[];
+}
+
+export interface SavedFileResult {
+  filePath: string;
+  fileName: string;
 }

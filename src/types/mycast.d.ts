@@ -13,6 +13,8 @@ export interface AppConfig {
   targetDisplayId: number | null;
   minimizeToTray: boolean;
   defaultQuality: QualityPreset;
+  recordingsDir: string;
+  screenshotsDir: string;
 }
 
 export type ReceiverStatus = 'idle' | 'casting' | 'receiving';
@@ -73,7 +75,8 @@ export type SignalingMessageType =
   | 'webrtc-offer'
   | 'webrtc-answer'
   | 'webrtc-ice'
-  | 'cast-stop';
+  | 'cast-stop'
+  | 'subtitle-cue';
 
 export interface SignalingMessage {
   type: SignalingMessageType;
@@ -85,6 +88,7 @@ export interface SignalingMessage {
   quality?: QualityPreset;
   sdp?: RTCSessionDescriptionInit;
   candidate?: RTCIceCandidateInit;
+  subtitleText?: string | null;
 }
 
 export interface StreamStats {
@@ -96,6 +100,54 @@ export interface StreamStats {
   jitterMs: number;
   codec: string;
   qualityLimitationReason?: string;
+}
+
+export interface MediaFileInfo {
+  path: string;
+  name: string;
+  size: number;
+}
+
+export interface SubtitleFileInfo {
+  path: string;
+  name: string;
+  content: string;
+}
+
+export interface SavedPlaylistItem {
+  id: string;
+  path: string;
+  name: string;
+  subtitlePath?: string;
+  subtitleName?: string;
+}
+
+export interface SavedPlaylist {
+  id: string;
+  name: string;
+  updatedAt: number;
+  items: SavedPlaylistItem[];
+}
+
+export interface SavedFileResult {
+  filePath: string;
+  fileName: string;
+}
+
+export interface MediaQueueItem {
+  id: string;
+  path: string;
+  name: string;
+  size: number;
+  mediaUrl: string;
+  duration: number;
+  width: number;
+  height: number;
+  thumbnailDataUrl: string | null;
+  subtitlePath?: string;
+  subtitleName?: string;
+  subtitleContent?: string;
+  error?: string;
 }
 
 export interface MyCastBridge {
@@ -120,10 +172,30 @@ export interface MyCastBridge {
   onTrayAction: (cb: (action: 'open-ambient' | 'disconnect-receiver') => void) => () => void;
   onFullscreenChanged: (cb: (isFullscreen: boolean) => void) => () => void;
   onSelfInfoUpdated: (cb: (info: SelfInfo) => void) => () => void;
+  pickMediaFiles: () => Promise<MediaFileInfo[]>;
+  pickSubtitleFile: () => Promise<SubtitleFileInfo | null>;
+  readSubtitleFile: (filePath: string) => Promise<SubtitleFileInfo>;
+  registerMediaFile: (filePath: string) => Promise<string>;
+  getPlaylists: () => Promise<SavedPlaylist[]>;
+  savePlaylists: (playlists: SavedPlaylist[]) => Promise<SavedPlaylist[]>;
+  pickDirectory: (defaultPath?: string) => Promise<string | null>;
+  saveScreenshot: (dataUrl: string, senderName?: string) => Promise<SavedFileResult>;
+  startRecordingFile: (
+    senderName?: string
+  ) => Promise<{ recordingId: string; filePath: string; fileName: string }>;
+  appendRecordingChunk: (recordingId: string, chunk: Uint8Array) => Promise<void>;
+  finishRecordingFile: (recordingId: string) => Promise<SavedFileResult>;
+  openFolder: (targetPath: string) => Promise<void>;
+  getPathForFile: (file: File) => string;
 }
 
 declare global {
   interface Window {
     mycast: MyCastBridge;
+  }
+
+  interface HTMLVideoElement {
+    captureStream?(frameRate?: number): MediaStream;
+    mozCaptureStream?(frameRate?: number): MediaStream;
   }
 }

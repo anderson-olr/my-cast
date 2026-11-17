@@ -374,11 +374,19 @@ export class SignalingServer extends EventEmitter {
           wr.activeSenderId = socketId;
           wr.activeSessionId = msg.sessionId;
           senderEntry.activeSessionId = msg.sessionId;
-        } else if (msg.type === 'cast-stop') {
-          wr.status = 'idle';
-          wr.activeSenderId = null;
-          wr.activeSessionId = null;
-          this.emit('web-receivers-updated', this.getWebReceiverPeers());
+        } else {
+          if (
+            wr.activeSenderId !== socketId ||
+            (wr.activeSessionId && msg.sessionId && msg.sessionId !== wr.activeSessionId)
+          ) {
+            return;
+          }
+          if (msg.type === 'cast-stop') {
+            wr.status = 'idle';
+            wr.activeSenderId = null;
+            wr.activeSessionId = null;
+            this.emit('web-receivers-updated', this.getWebReceiverPeers());
+          }
         }
 
         this.sendJson(wr.ws, msg);

@@ -2,10 +2,12 @@ import {
   app,
   BrowserWindow,
   desktopCapturer,
+  dialog,
   ipcMain,
   Menu,
   nativeImage,
   screen,
+  shell,
   Tray,
 } from 'electron';
 import crypto from 'node:crypto';
@@ -13,15 +15,20 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DiscoveryService, getLanInterfaces, getPrimaryLanIp } from './discovery';
+import { LocalMediaServer } from './mediaServer';
 import { DEFAULT_PORT, SignalingServer } from './signalingServer';
 import {
   AppConfig,
   DesktopSourceInfo,
   DiscoveredPeer,
   DisplayInfo,
+  MediaFileInfo,
   ReceiverStatus,
+  SavedFileResult,
+  SavedPlaylist,
   SelfInfo,
   SignalingMessage,
+  SubtitleFileInfo,
 } from './types';
 
 // Must be called before app is ready so receiver autoplays with audio and WebRTC exposes LAN IPs immediately
@@ -60,6 +67,14 @@ function generatePin(): string {
   return String(Math.floor(1000 + Math.random() * 9000));
 }
 
+function getDefaultMediaFolder(kind: 'videos' | 'pictures'): string {
+  try {
+    return path.join(app.getPath(kind), 'MyCast');
+  } catch {
+    return path.join(os.homedir(), kind === 'videos' ? 'Videos' : 'Pictures', 'MyCast');
+  }
+}
+
 function createDefaultConfig(): AppConfig {
   return {
     deviceName: os.hostname() || 'MyCast PC',
@@ -74,12 +89,19 @@ function createDefaultConfig(): AppConfig {
       bitrateMbps: 8,
       includeAudio: true,
     },
+    recordingsDir: getDefaultMediaFolder('videos'),
+    screenshotsDir: getDefaultMediaFolder('pictures'),
   };
 }
 
 function getConfigPath(): string {
   const suffix = cliPort ? `-${cliPort}` : '';
   return path.join(app.getPath('userData'), `mycast-config${suffix}.json`);
+}
+
+function getPlaylistsPath(): string {
+  const suffix = cliPort ? `-${cliPort}` : '';
+  return path.join(app.getPath('userData'), `mycast-playlists${suffix}.json`);
 }
 
 let appConfig: AppConfig = createDefaultConfig();
@@ -93,6 +115,8 @@ function loadConfig(): AppConfig {
       appConfig = {
         ...defaults,
         ...raw,
+        recordingsDir: raw.recordingsDir || defaults.recordingsDir,
+        screenshotsDir: raw.screenshotsDir || defaults.screenshotsDir,
         defaultQuality: {
           ...defaults.defaultQuality,
           ...(raw.defaultQuality || {}),
@@ -116,6 +140,58 @@ function saveConfig(cfg: AppConfig): void {
   } catch (err) {
     console.warn('[Config] Failed to save config:', err);
   }
+}
+
+function loadPlaylists(): SavedPlaylist[] {
+  try {
+    const pPath = getPlaylistsPath();
+    if (fs.existsSync(pPath)) {
+      const parsed = JSON.parse(fs.readFileSync(pPath, 'utf8'));
+      if (Array.isArray(parsed)) {
+        return parsed as SavedPlaylist[];
+      }
+    }
+  } catch (err) {
+    console.warn('[Playlists] Failed to load playlists:', err);
+  }
+  return [];
+}
+
+function savePlaylistsToDisk(playlists: SavedPlaylist[]): SavedPlaylist[] {
+  try {
+    const pPath = getPlaylistsPath();
+    fs.mkdirSync(path.dirname(pPath), { recursive: true });
+    fs.writeFileSync(pPath, JSON.stringify(playlists, null, 2), 'utf8');
+  } catch (err) {
+    console.warn('[Playlists] Failed to save playlists:', err);
+  }
+  return playlists;
+}
+
+function formatTimestampForFile(date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const y = date.getFullYear();
+  const m = pad(date.getMonth() + 1);
+  const d = pad(date.getDate());
+  const hh = pad(date.getHours());
+  const mm = pad(date.getMinutes());
+  const ss = pad(date.getSeconds());
+  return `${y}-${m}-${d}_${hh}-${mm}-${ss}`;
+}
+
+function resolveUniqueFilePath(dir: string, baseName: string, ext: string): {
+  filePath: string;
+  fileName: string;
+} {
+  let fileName = `${baseName}${ext}`;
+  let filePath = path.join(dir, fileName);
+  let counter = 1;
+  while (fs.existsSync(filePath)) {
+    fileName = `${baseName}-${counter}${ext}`;
+    filePath = path.join(dir, fileName);
+    counter++;
+  }
+  return { filePath, fileName };
 }
 
 function createCastIconImage(size = 32): Electron.NativeImage {
@@ -189,6 +265,11 @@ function createCastIconImage(size = 32): Electron.NativeImage {
 
 let signalingServer: SignalingServer;
 let discoveryService: DiscoveryService;
+let localMediaServer: LocalMediaServer;
+const activeRecordings = new Map<
+  string,
+  { stream: fs.WriteStream; filePath: string; fileName: string }
+>();
 
 function getSelfInfo(): SelfInfo {
   const ip = getPrimaryLanIp();
@@ -498,6 +579,203 @@ function registerIpcHandlers(): void {
   ipcMain.on('send-receiver-signaling', (_event, msg: SignalingMessage) => {
     signalingServer?.sendToLocalSender(msg);
   });
+
+  ipcMain.handle('pick-media-files', async (): Promise<MediaFileInfo[]> => {
+    const dialogOpts: Electron.OpenDialogOptions = {
+      title: 'Select Video Files',
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        {
+          name: 'Video Files',
+          extensions: ['mp4', 'webm', 'mkv', 'mov', 'm4v', 'avi', 'ogv'],
+        },
+        { name: 'All Files', extensions: ['*'] },
+      ],
+    };
+
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, dialogOpts)
+      : await dialog.showOpenDialog(dialogOpts);
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return [];
+    }
+
+    const items: MediaFileInfo[] = [];
+    for (const filePath of result.filePaths) {
+      try {
+        const stat = fs.statSync(filePath);
+        if (stat.isFile()) {
+          items.push({
+            path: filePath,
+            name: path.basename(filePath),
+            size: stat.size,
+          });
+        }
+      } catch {
+        // Ignore unreadable file
+      }
+    }
+    return items;
+  });
+
+  ipcMain.handle('pick-subtitle-file', async (): Promise<SubtitleFileInfo | null> => {
+    const dialogOpts: Electron.OpenDialogOptions = {
+      title: 'Select Subtitle File',
+      properties: ['openFile'],
+      filters: [{ name: 'Subtitles', extensions: ['srt', 'vtt'] }],
+    };
+
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, dialogOpts)
+      : await dialog.showOpenDialog(dialogOpts);
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return null;
+    }
+
+    const filePath = result.filePaths[0];
+    const content = fs.readFileSync(filePath, 'utf8');
+    return {
+      path: filePath,
+      name: path.basename(filePath),
+      content,
+    };
+  });
+
+  ipcMain.handle('read-subtitle-file', (_event, filePath: string): SubtitleFileInfo => {
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext !== '.srt' && ext !== '.vtt') {
+      throw new Error('Only .srt and .vtt subtitle files are supported');
+    }
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) {
+      throw new Error('Subtitle file does not exist');
+    }
+    return {
+      path: filePath,
+      name: path.basename(filePath),
+      content: fs.readFileSync(filePath, 'utf8'),
+    };
+  });
+
+  ipcMain.handle('register-media-file', (_event, filePath: string): string => {
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+      throw new Error(`Media file not found: ${filePath}`);
+    }
+    return localMediaServer.registerFile(filePath);
+  });
+
+  ipcMain.handle('get-playlists', (): SavedPlaylist[] => {
+    return loadPlaylists();
+  });
+
+  ipcMain.handle('save-playlists', (_event, playlists: SavedPlaylist[]): SavedPlaylist[] => {
+    return savePlaylistsToDisk(Array.isArray(playlists) ? playlists : []);
+  });
+
+  ipcMain.handle('pick-directory', async (_event, defaultPath?: string): Promise<string | null> => {
+    const dialogOpts: Electron.OpenDialogOptions = {
+      title: 'Select Folder',
+      defaultPath: defaultPath || undefined,
+      properties: ['openDirectory', 'createDirectory'],
+    };
+
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, dialogOpts)
+      : await dialog.showOpenDialog(dialogOpts);
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return null;
+    }
+    return result.filePaths[0];
+  });
+
+  ipcMain.handle(
+    'save-screenshot',
+    (_event, dataUrl: string, _senderName?: string): SavedFileResult => {
+      const targetDir = appConfig.screenshotsDir || getDefaultMediaFolder('pictures');
+      fs.mkdirSync(targetDir, { recursive: true });
+      const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+      const buffer = Buffer.from(base64, 'base64');
+      const timestamp = formatTimestampForFile();
+      const { filePath, fileName } = resolveUniqueFilePath(
+        targetDir,
+        `MyCast-Screenshot-${timestamp}`,
+        '.png'
+      );
+      fs.writeFileSync(filePath, buffer);
+      return { filePath, fileName };
+    }
+  );
+
+  ipcMain.handle(
+    'start-recording-file',
+    (_event, _senderName?: string): { recordingId: string; filePath: string; fileName: string } => {
+      const targetDir = appConfig.recordingsDir || getDefaultMediaFolder('videos');
+      fs.mkdirSync(targetDir, { recursive: true });
+      const recordingId = crypto.randomUUID();
+      const timestamp = formatTimestampForFile();
+      const { filePath, fileName } = resolveUniqueFilePath(
+        targetDir,
+        `MyCast-Recording-${timestamp}`,
+        '.webm'
+      );
+      const stream = fs.createWriteStream(filePath);
+      stream.on('error', (err) => {
+        console.error('[Recording] WriteStream error:', err.message);
+      });
+      activeRecordings.set(recordingId, { stream, filePath, fileName });
+      return { recordingId, filePath, fileName };
+    }
+  );
+
+  ipcMain.handle(
+    'append-recording-chunk',
+    (_event, recordingId: string, chunk: Uint8Array): Promise<void> => {
+      const entry = activeRecordings.get(recordingId);
+      if (!entry) {
+        return Promise.reject(new Error('Recording session not active'));
+      }
+      return new Promise((resolve, reject) => {
+        const buf = Buffer.from(chunk);
+        entry.stream.write(buf, (err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+    }
+  );
+
+  ipcMain.handle('finish-recording-file', (_event, recordingId: string): Promise<SavedFileResult> => {
+    const entry = activeRecordings.get(recordingId);
+    if (!entry) {
+      return Promise.reject(new Error('Recording session not found'));
+    }
+    activeRecordings.delete(recordingId);
+    return new Promise((resolve, reject) => {
+      entry.stream.once('error', (err) => reject(err));
+      entry.stream.end(() => {
+        resolve({
+          filePath: entry.filePath,
+          fileName: entry.fileName,
+        });
+      });
+    });
+  });
+
+  ipcMain.handle('open-folder', async (_event, targetPath: string): Promise<void> => {
+    if (!targetPath) return;
+    if (fs.existsSync(targetPath) && fs.statSync(targetPath).isFile()) {
+      shell.showItemInFolder(targetPath);
+      return;
+    }
+    fs.mkdirSync(targetPath, { recursive: true });
+    const errMessage = await shell.openPath(targetPath);
+    if (errMessage) {
+      throw new Error(errMessage);
+    }
+  });
 }
 
 if (!allowMulti) {
@@ -508,6 +786,10 @@ if (!allowMulti) {
 
 app.whenReady().then(async () => {
   loadConfig();
+
+  localMediaServer = new LocalMediaServer();
+  const mediaPort = await localMediaServer.start();
+  console.log(`[MyCast] Local media server listening on 127.0.0.1:${mediaPort}`);
 
   signalingServer = new SignalingServer({
     selfId,
@@ -552,6 +834,15 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  for (const [id, entry] of activeRecordings.entries()) {
+    try {
+      entry.stream.end();
+    } catch {
+      // ignore
+    }
+    activeRecordings.delete(id);
+  }
+  localMediaServer?.stop();
   discoveryService?.stop();
   signalingServer?.stop();
 });

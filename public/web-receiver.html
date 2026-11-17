@@ -347,6 +347,31 @@
     .stats-overlay.visible {
       display: block;
     }
+
+    .subtitle-overlay {
+      position: fixed;
+      left: 50%;
+      bottom: 96px;
+      transform: translateX(-50%);
+      max-width: min(82vw, 900px);
+      padding: 8px 16px;
+      border-radius: 10px;
+      background: rgba(7, 10, 18, 0.78);
+      color: #ffffff;
+      font-size: clamp(16px, 2.2vw, 24px);
+      font-weight: 600;
+      line-height: 1.4;
+      text-align: center;
+      text-shadow: 0 2px 6px rgba(0, 0, 0, 0.9);
+      white-space: pre-line;
+      pointer-events: none;
+      z-index: 28;
+      display: none;
+    }
+
+    .subtitle-overlay.visible {
+      display: block;
+    }
   </style>
 </head>
 <body>
@@ -398,6 +423,7 @@
     <video id="remoteVideo" autoplay playsinline></video>
     <div id="unmuteToast" class="unmute-toast">Browser muted autoplay audio — Click here to unmute</div>
 
+    <div id="subtitleOverlay" class="subtitle-overlay"></div>
     <div id="statsOverlay" class="stats-overlay"></div>
 
     <div id="hud" class="hud">
@@ -423,6 +449,7 @@
       const remoteVideo = document.getElementById('remoteVideo');
       const unmuteToast = document.getElementById('unmuteToast');
       const hudEl = document.getElementById('hud');
+      const subtitleOverlay = document.getElementById('subtitleOverlay');
       const statsOverlay = document.getElementById('statsOverlay');
       const connDot = document.getElementById('connDot');
       const connText = document.getElementById('connText');
@@ -523,6 +550,8 @@
         prevBytes = 0;
         prevTs = 0;
         unmuteToast.classList.remove('visible');
+        subtitleOverlay.textContent = '';
+        subtitleOverlay.classList.remove('visible');
         playerStageEl.classList.remove('active', 'hide-cursor');
         ambientEl.classList.remove('hidden');
         statsOverlay.classList.remove('visible');
@@ -687,6 +716,10 @@
           } else {
             pendingIce.push(msg.candidate);
           }
+        } else if (msg.type === 'subtitle-cue') {
+          const text = msg.subtitleText || '';
+          subtitleOverlay.textContent = text;
+          subtitleOverlay.classList.toggle('visible', Boolean(text));
         } else if (msg.type === 'cast-stop') {
           cleanupStream(false);
         }

@@ -1,7 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Copy, Globe, Laptop, RefreshCw } from 'lucide-react';
+import {
+  ArrowUpRight,
+  Check,
+  Copy,
+  Globe,
+  Laptop,
+  Pause,
+  Play,
+  RefreshCw,
+  Square,
+  Volume2,
+  VolumeX,
+} from 'lucide-react';
 import { Sidebar, NavTab } from './components/Sidebar';
 import { SenderView } from './components/SenderView';
+import { MediaView } from './components/MediaView';
 import { ReceiverView } from './components/ReceiverView';
 import { SettingsView } from './components/SettingsView';
 import { WebRtcSenderController } from './services/webrtcSender';
@@ -11,10 +24,14 @@ import {
   DesktopSourceInfo,
   DiscoveredPeer,
   DisplayInfo,
+  MediaQueueItem,
   QualityPreset,
+  SavedPlaylist,
   SelfInfo,
   StreamStats,
 } from './types/mycast';
+import { probeMediaUrl } from './utils/mediaMetadata';
+import { findActiveSubtitleCue, parseSubtitles, SubtitleCue } from './utils/subtitleParser';
 
 const DEFAULT_QUALITY: QualityPreset = {
   resolution: '1080p',
@@ -22,6 +39,50 @@ const DEFAULT_QUALITY: QualityPreset = {
   bitrateMbps: 8,
   includeAudio: true,
 };
+
+const VIDEO_EXTENSIONS = new Set([
+  '.mp4',
+  '.webm',
+  '.mkv',
+  '.mov',
+  '.m4v',
+  '.avi',
+  '.ogv',
+]);
+const SUBTITLE_EXTENSIONS = new Set(['.srt', '.vtt']);
+
+function getFileExtension(filePath: string): string {
+  const idx = filePath.lastIndexOf('.');
+  return idx >= 0 ? filePath.slice(idx).toLowerCase() : '';
+}
+
+function getFileBaseName(filePath: string): string {
+  const normalized = filePath.replace(/\\/g, '/');
+  const idx = normalized.lastIndexOf('/');
+  return idx >= 0 ? normalized.slice(idx + 1) : normalized;
+}
+
+function resolveTargetPeer(
+  selfInfo: SelfInfo | null,
+  peers: DiscoveredPeer[],
+  selectedPeerId: string | null
+): DiscoveredPeer | undefined {
+  if (!selfInfo) return undefined;
+  if (selectedPeerId === '__loopback__') {
+    return {
+      id: '__loopback__',
+      name: `${selfInfo.name} (Loopback Test)`,
+      hostname: selfInfo.hostname,
+      ip: '127.0.0.1',
+      port: selfInfo.port,
+      pinRequired: selfInfo.pinRequired,
+      status: 'idle',
+      lastSeen: Date.now(),
+      isLoopback: true,
+    };
+  }
+  return peers.find((p) => p.id === selectedPeerId);
+}
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<NavTab>('cast');
@@ -38,16 +99,30 @@ export const App: React.FC = () => {
   const [quality, setQuality] = useState<QualityPreset>(DEFAULT_QUALITY);
   const [pinInput, setPinInput] = useState('');
   const [castState, setCastState] = useState<'stopped' | 'connecting' | 'casting'>('stopped');
+  const [castMode, setCastMode] = useState<'screen' | 'media'>('screen');
   const [videoPaused, setVideoPaused] = useState(false);
   const [audioMuted, setAudioMuted] = useState(false);
   const [senderStats, setSenderStats] = useState<StreamStats | null>(null);
   const [senderWarning, setSenderWarning] = useState<string | null>(null);
   const [senderError, setSenderError] = useState<string | null>(null);
 
+  // Cast Media state
+  const [mediaQueue, setMediaQueue] = useState<MediaQueueItem[]>([]);
+  const [activeMediaIndex, setActiveMediaIndex] = useState<number>(-1);
+  const [mediaIsPlaying, setMediaIsPlaying] = useState(false);
+  const [mediaCurrentTime, setMediaCurrentTime] = useState(0);
+  const [mediaDuration, setMediaDuration] = useState(0);
+  const [mediaPlaybackRate, setMediaPlaybackRate] = useState(1);
+  const [mediaLoopMode, setMediaLoopMode] = useState<'off' | 'all' | 'one'>('off');
+  const [mediaShuffle, setMediaShuffle] = useState(false);
+  const [activeSubtitleCue, setActiveSubtitleCue] = useState<string | null>(null);
+  const [savedPlaylists, setSavedPlaylists] = useState<SavedPlaylist[]>([]);
+
   // Receiver state
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [receiverSenderName, setReceiverSenderName] = useState('');
   const [receiverStats, setReceiverStats] = useState<StreamStats | null>(null);
+  const [receiverSubtitleText, setReceiverSubtitleText] = useState<string | null>(null);
   const [copiedUrl, setCopiedUrl] = useState(false);
 
   const configRef = useRef<AppConfig | null>(null);
@@ -56,14 +131,159 @@ export const App: React.FC = () => {
   const tabBeforeCastRef = useRef<NavTab>('cast');
   const enteredFullscreenForCastRef = useRef(false);
   const castStateRef = useRef<'stopped' | 'connecting' | 'casting'>('stopped');
+  const castModeRef = useRef<'screen' | 'media'>('screen');
+  const mediaQueueRef = useRef<MediaQueueItem[]>([]);
+  const activeMediaIndexRef = useRef<number>(-1);
+  const mediaLoopModeRef = useRef<'off' | 'all' | 'one'>('off');
+  const mediaShuffleRef = useRef(false);
+  const mediaPlaybackRateRef = useRef(1);
+  const parsedCuesRef = useRef<SubtitleCue[]>([]);
+  const lastSentCueRef = useRef<string | null>(null);
+  const loadSeqRef = useRef(0);
+
+  const mediaVideoRef = useRef<HTMLVideoElement | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const mediaSourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
+  const audioDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+  const activeMediaVideoTrackRef = useRef<MediaStreamTrack | null>(null);
+
+  const activeMediaItem = useMemo(
+    () =>
+      activeMediaIndex >= 0 && activeMediaIndex < mediaQueue.length
+        ? mediaQueue[activeMediaIndex]
+        : null,
+    [mediaQueue, activeMediaIndex]
+  );
+
+  const parsedSubtitleCues = useMemo(
+    () => (activeMediaItem?.subtitleContent ? parseSubtitles(activeMediaItem.subtitleContent) : []),
+    [activeMediaItem?.subtitleContent]
+  );
 
   configRef.current = config;
   selfInfoRef.current = selfInfo;
   activeTabRef.current = activeTab;
   castStateRef.current = castState;
+  castModeRef.current = castMode;
+  mediaQueueRef.current = mediaQueue;
+  activeMediaIndexRef.current = activeMediaIndex;
+  mediaLoopModeRef.current = mediaLoopMode;
+  mediaShuffleRef.current = mediaShuffle;
+  mediaPlaybackRateRef.current = mediaPlaybackRate;
+  parsedCuesRef.current = parsedSubtitleCues;
 
   const senderRef = useRef<WebRtcSenderController | null>(null);
   const receiverRef = useRef<WebRtcReceiverController | null>(null);
+
+  const syncSubtitleForTime = useCallback((timeSec: number) => {
+    const cue = findActiveSubtitleCue(parsedCuesRef.current, timeSec);
+    setActiveSubtitleCue(cue);
+    if (cue !== lastSentCueRef.current) {
+      lastSentCueRef.current = cue;
+      if (castStateRef.current === 'casting' && castModeRef.current === 'media') {
+        senderRef.current?.sendSubtitleCue(cue);
+      }
+    }
+  }, []);
+
+  const ensureAudioGraph = useCallback(async () => {
+    const video = mediaVideoRef.current;
+    if (!video) throw new Error('Media playback element not mounted');
+    if (!audioCtxRef.current) {
+      const ctx = new AudioContext();
+      const source = ctx.createMediaElementSource(video);
+      const dest = ctx.createMediaStreamDestination();
+      // Route ONLY to MediaStreamAudioDestinationNode so sender speakers stay silent
+      source.connect(dest);
+      audioCtxRef.current = ctx;
+      mediaSourceNodeRef.current = source;
+      audioDestRef.current = dest;
+    }
+    if (audioCtxRef.current.state === 'suspended') {
+      await audioCtxRef.current.resume();
+    }
+    return audioDestRef.current!;
+  }, []);
+
+  const captureVideoTrackFromElement = useCallback(
+    (video: HTMLVideoElement): MediaStreamTrack | null => {
+      const captured = video.captureStream
+        ? video.captureStream()
+        : video.mozCaptureStream
+          ? video.mozCaptureStream()
+          : null;
+      if (!captured) return null;
+      return captured.getVideoTracks()[0] || null;
+    },
+    []
+  );
+
+  const loadMediaItem = useCallback(
+    async (item: MediaQueueItem, shouldPlay: boolean): Promise<MediaStreamTrack | null> => {
+      const video = mediaVideoRef.current;
+      if (!video) throw new Error('Media playback element unavailable');
+
+      const seq = ++loadSeqRef.current;
+
+      await new Promise<void>((resolve, reject) => {
+        const cleanupListeners = () => {
+          video.onloadeddata = null;
+          video.onerror = null;
+        };
+
+        video.onloadeddata = () => {
+          cleanupListeners();
+          resolve();
+        };
+
+        video.onerror = () => {
+          cleanupListeners();
+          reject(new Error(`Failed to decode "${item.name}". Unsupported codec or unreadable file.`));
+        };
+
+        video.pause();
+        video.src = item.mediaUrl;
+        video.currentTime = 0;
+        video.playbackRate = mediaPlaybackRateRef.current;
+        video.load();
+      });
+
+      if (seq !== loadSeqRef.current) return null;
+
+      const dur = Number.isFinite(video.duration) ? video.duration : item.duration || 0;
+      setMediaDuration(dur);
+      setMediaCurrentTime(0);
+
+      if (shouldPlay) {
+        await ensureAudioGraph();
+        await video.play();
+      }
+
+      if (seq !== loadSeqRef.current) return null;
+
+      const newVideoTrack = captureVideoTrackFromElement(video);
+      if (
+        castStateRef.current === 'casting' &&
+        castModeRef.current === 'media' &&
+        senderRef.current
+      ) {
+        const prevTrack = activeMediaVideoTrackRef.current;
+        await senderRef.current.replaceMediaVideoTrack(newVideoTrack);
+        if (prevTrack && prevTrack !== newVideoTrack) {
+          try {
+            prevTrack.stop();
+          } catch {
+            // ignore
+          }
+        }
+        activeMediaVideoTrackRef.current = newVideoTrack;
+      }
+
+      syncSubtitleForTime(video.currentTime || 0);
+      return newVideoTrack;
+    },
+    [captureVideoTrackFromElement, ensureAudioGraph, syncSubtitleForTime]
+  );
 
   const refreshSources = useCallback(async () => {
     try {
@@ -96,10 +316,33 @@ export const App: React.FC = () => {
           setVideoPaused(false);
           setAudioMuted(false);
           window.mycast.setStatus('casting').catch(() => {});
+          if (castModeRef.current === 'media' && mediaVideoRef.current) {
+            const cue = findActiveSubtitleCue(
+              parsedCuesRef.current,
+              mediaVideoRef.current.currentTime || 0
+            );
+            lastSentCueRef.current = cue;
+            senderRef.current?.sendSubtitleCue(cue);
+          }
         } else if (nextState === 'stopped') {
           setSenderStats(null);
           setVideoPaused(false);
           setAudioMuted(false);
+          if (castModeRef.current === 'media') {
+            if (mediaVideoRef.current && !mediaVideoRef.current.paused) {
+              mediaVideoRef.current.pause();
+            }
+            setMediaIsPlaying(false);
+            lastSentCueRef.current = null;
+            if (activeMediaVideoTrackRef.current) {
+              try {
+                activeMediaVideoTrackRef.current.stop();
+              } catch {
+                // ignore
+              }
+              activeMediaVideoTrackRef.current = null;
+            }
+          }
           window.mycast.setStatus('idle').catch(() => {});
           if (message && !message.includes('Stopped by sender')) {
             setSenderWarning(message);
@@ -122,6 +365,7 @@ export const App: React.FC = () => {
         const isLoopback = Boolean(senderId && selfInfoRef.current && senderId === selfInfoRef.current.id);
         tabBeforeCastRef.current = activeTabRef.current;
         setReceiverSenderName(senderName);
+        setReceiverSubtitleText(null);
         setActiveTab('receiver');
 
         if (!isLoopback) {
@@ -140,10 +384,14 @@ export const App: React.FC = () => {
       onStats: (stats) => {
         setReceiverStats(stats);
       },
+      onSubtitleCue: (text) => {
+        setReceiverSubtitleText(text);
+      },
       onCastEnded: () => {
         setRemoteStream(null);
         setReceiverStats(null);
         setReceiverSenderName('');
+        setReceiverSubtitleText(null);
 
         if (enteredFullscreenForCastRef.current) {
           enteredFullscreenForCastRef.current = false;
@@ -163,6 +411,10 @@ export const App: React.FC = () => {
     return () => {
       senderRef.current?.stopCast(false);
       receiverRef.current?.disconnect('App closed');
+      if (audioCtxRef.current) {
+        audioCtxRef.current.close().catch(() => {});
+        audioCtxRef.current = null;
+      }
     };
   }, []);
 
@@ -170,11 +422,12 @@ export const App: React.FC = () => {
     let mounted = true;
 
     async function init() {
-      const [info, cfg, initialPeers, full] = await Promise.all([
+      const [info, cfg, initialPeers, full, playlists] = await Promise.all([
         window.mycast.getSelfInfo(),
         window.mycast.getConfig(),
         window.mycast.getPeers(),
         window.mycast.isFullscreen(),
+        window.mycast.getPlaylists().catch(() => [] as SavedPlaylist[]),
       ]);
       if (!mounted) return;
       setSelfInfo(info);
@@ -182,6 +435,7 @@ export const App: React.FC = () => {
       setQuality(cfg.defaultQuality || DEFAULT_QUALITY);
       setPeers(initialPeers);
       setIsFullscreen(full);
+      setSavedPlaylists(playlists);
 
       if (initialPeers.length > 0) {
         setSelectedPeerId(initialPeers[0].id);
@@ -233,6 +487,114 @@ export const App: React.FC = () => {
     };
   }, [refreshSources, refreshDisplays]);
 
+  const selectAndPlayIndex = useCallback(
+    async (index: number, shouldPlay: boolean) => {
+      const queue = mediaQueueRef.current;
+      if (index < 0 || index >= queue.length) return;
+      const item = queue[index];
+      setActiveMediaIndex(index);
+      setSenderError(null);
+      try {
+        await loadMediaItem(item, shouldPlay);
+        setMediaQueue((prev) =>
+          prev.map((q) => (q.id === item.id && q.error ? { ...q, error: undefined } : q))
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : `Failed to load ${item.name}`;
+        setMediaQueue((prev) =>
+          prev.map((q) => (q.id === item.id ? { ...q, error: msg } : q))
+        );
+        setSenderError(msg);
+        setMediaIsPlaying(false);
+      }
+    },
+    [loadMediaItem]
+  );
+
+  const computeNextIndex = useCallback((currentIndex: number, queueLength: number): number => {
+    if (queueLength === 0) return -1;
+    if (mediaShuffleRef.current && queueLength > 1) {
+      let next = currentIndex;
+      while (next === currentIndex) {
+        next = Math.floor(Math.random() * queueLength);
+      }
+      return next;
+    }
+    if (currentIndex + 1 < queueLength) {
+      return currentIndex + 1;
+    }
+    if (mediaLoopModeRef.current === 'all') {
+      return 0;
+    }
+    return -1;
+  }, []);
+
+  // Re-evaluate active subtitle cue whenever the active item's cues change
+  useEffect(() => {
+    const video = mediaVideoRef.current;
+    syncSubtitleForTime(video ? video.currentTime : 0);
+  }, [parsedSubtitleCues, syncSubtitleForTime]);
+
+  // Attach listeners to the persistent hidden <video> media player
+  useEffect(() => {
+    const video = mediaVideoRef.current;
+    if (!video) return;
+
+    const onTimeUpdate = () => {
+      setMediaCurrentTime(video.currentTime || 0);
+      syncSubtitleForTime(video.currentTime || 0);
+    };
+
+    const onDurationChange = () => {
+      if (Number.isFinite(video.duration)) {
+        setMediaDuration(video.duration);
+      }
+    };
+
+    const onPlay = () => setMediaIsPlaying(true);
+    const onPause = () => setMediaIsPlaying(false);
+
+    const onEnded = () => {
+      setMediaIsPlaying(false);
+      if (mediaLoopModeRef.current === 'one') {
+        video.currentTime = 0;
+        video.play().catch(() => {});
+        return;
+      }
+      const nextIdx = computeNextIndex(
+        activeMediaIndexRef.current,
+        mediaQueueRef.current.length
+      );
+      if (nextIdx >= 0) {
+        selectAndPlayIndex(nextIdx, true);
+      } else {
+        lastSentCueRef.current = null;
+        setActiveSubtitleCue(null);
+        if (castStateRef.current === 'casting' && castModeRef.current === 'media') {
+          senderRef.current?.sendSubtitleCue(null);
+        }
+      }
+    };
+
+    video.addEventListener('timeupdate', onTimeUpdate);
+    video.addEventListener('seeked', onTimeUpdate);
+    video.addEventListener('durationchange', onDurationChange);
+    video.addEventListener('loadedmetadata', onDurationChange);
+    video.addEventListener('play', onPlay);
+    video.addEventListener('pause', onPause);
+    video.addEventListener('ended', onEnded);
+
+    return () => {
+      video.removeEventListener('timeupdate', onTimeUpdate);
+      video.removeEventListener('seeked', onTimeUpdate);
+      video.removeEventListener('durationchange', onDurationChange);
+      video.removeEventListener('loadedmetadata', onDurationChange);
+      video.removeEventListener('play', onPlay);
+      video.removeEventListener('pause', onPause);
+      video.removeEventListener('ended', onEnded);
+    };
+  }, [computeNextIndex, selectAndPlayIndex, syncSubtitleForTime]);
+
   const handleQualityChange = useCallback(
     async (next: QualityPreset) => {
       setQuality(next);
@@ -246,26 +608,23 @@ export const App: React.FC = () => {
 
   const handleStartCast = useCallback(async () => {
     if (!selfInfo || !selectedSourceId || !senderRef.current) return;
-
-    const target: DiscoveredPeer | undefined =
-      selectedPeerId === '__loopback__'
-        ? {
-            id: '__loopback__',
-            name: `${selfInfo.name} (Loopback Test)`,
-            hostname: selfInfo.hostname,
-            ip: '127.0.0.1',
-            port: selfInfo.port,
-            pinRequired: selfInfo.pinRequired,
-            status: 'idle',
-            lastSeen: Date.now(),
-            isLoopback: true,
-          }
-        : peers.find((p) => p.id === selectedPeerId);
-
+    const target = resolveTargetPeer(selfInfo, peers, selectedPeerId);
     if (!target) return;
 
     setSenderError(null);
     setSenderWarning(null);
+
+    if (castStateRef.current === 'casting') {
+      await senderRef.current.stopCast(true, 'Stopped by sender');
+    }
+
+    if (mediaVideoRef.current && !mediaVideoRef.current.paused) {
+      mediaVideoRef.current.pause();
+    }
+    lastSentCueRef.current = null;
+    setActiveSubtitleCue(null);
+    castModeRef.current = 'screen';
+    setCastMode('screen');
 
     try {
       await senderRef.current.startCast({
@@ -281,6 +640,512 @@ export const App: React.FC = () => {
       // Error already surfaced via onError callback
     }
   }, [selfInfo, selectedPeerId, selectedSourceId, peers, quality, pinInput]);
+
+  const handleStartMediaCast = useCallback(async () => {
+    if (!selfInfo || !senderRef.current) return;
+    const queue = mediaQueueRef.current;
+    if (queue.length === 0) return;
+
+    const target = resolveTargetPeer(selfInfo, peers, selectedPeerId);
+    if (!target) return;
+
+    const targetIndex =
+      activeMediaIndexRef.current >= 0 && activeMediaIndexRef.current < queue.length
+        ? activeMediaIndexRef.current
+        : 0;
+    const item = queue[targetIndex];
+    setActiveMediaIndex(targetIndex);
+    setSenderError(null);
+    setSenderWarning(null);
+
+    const video = mediaVideoRef.current;
+    if (!video) return;
+
+    try {
+      if (castStateRef.current === 'casting') {
+        await senderRef.current.stopCast(true, 'Stopped by sender');
+      }
+
+      const dest = await ensureAudioGraph();
+      let videoTrack: MediaStreamTrack | null = null;
+
+      if (video.src === item.mediaUrl && video.readyState >= 2) {
+        video.playbackRate = mediaPlaybackRateRef.current;
+        await video.play();
+        videoTrack = captureVideoTrackFromElement(video);
+      } else {
+        videoTrack = await loadMediaItem(item, true);
+      }
+
+      if (!videoTrack) {
+        throw new Error('Failed to capture video stream from media player');
+      }
+
+      if (activeMediaVideoTrackRef.current && activeMediaVideoTrackRef.current !== videoTrack) {
+        try {
+          activeMediaVideoTrackRef.current.stop();
+        } catch {
+          // ignore
+        }
+      }
+      activeMediaVideoTrackRef.current = videoTrack;
+
+      const stream = new MediaStream([videoTrack]);
+      if (quality.includeAudio) {
+        const audioTrack = dest.stream.getAudioTracks()[0];
+        if (audioTrack) {
+          audioTrack.enabled = true;
+          stream.addTrack(audioTrack);
+        }
+      }
+
+      castModeRef.current = 'media';
+      setCastMode('media');
+      await senderRef.current.startMediaCast({
+        target,
+        stream,
+        quality,
+        selfId: selfInfo.id,
+        selfName: selfInfo.name,
+        selfPort: selfInfo.port,
+        pin: target.pinRequired ? pinInput : undefined,
+      });
+    } catch (err) {
+      if (!video.paused) {
+        video.pause();
+      }
+      if (err instanceof Error) {
+        setSenderError(err.message);
+      }
+    }
+  }, [
+    selfInfo,
+    peers,
+    selectedPeerId,
+    quality,
+    pinInput,
+    ensureAudioGraph,
+    captureVideoTrackFromElement,
+    loadMediaItem,
+  ]);
+
+  const enqueueVideoFiles = useCallback(
+    async (entries: Array<{ path: string; name?: string; size?: number }>) => {
+      if (entries.length === 0) return;
+
+      const created: MediaQueueItem[] = [];
+      for (const entry of entries) {
+        try {
+          const mediaUrl = await window.mycast.registerMediaFile(entry.path);
+          const meta = await probeMediaUrl(mediaUrl);
+          created.push({
+            id: crypto.randomUUID(),
+            path: entry.path,
+            name: entry.name || getFileBaseName(entry.path),
+            size: entry.size || 0,
+            mediaUrl,
+            duration: meta.duration,
+            width: meta.width,
+            height: meta.height,
+            thumbnailDataUrl: meta.thumbnailDataUrl,
+          });
+        } catch (err) {
+          created.push({
+            id: crypto.randomUUID(),
+            path: entry.path,
+            name: entry.name || getFileBaseName(entry.path),
+            size: entry.size || 0,
+            mediaUrl: '',
+            duration: 0,
+            width: 0,
+            height: 0,
+            thumbnailDataUrl: null,
+            error: err instanceof Error ? err.message : 'Failed to register media file',
+          });
+        }
+      }
+
+      const wasEmpty = mediaQueueRef.current.length === 0 || activeMediaIndexRef.current === -1;
+      setMediaQueue((prev) => [...prev, ...created]);
+      if (wasEmpty && created.length > 0 && created[0].mediaUrl) {
+        setActiveMediaIndex(mediaQueueRef.current.length);
+        loadMediaItem(created[0], false).catch(() => {});
+      }
+    },
+    [loadMediaItem]
+  );
+
+  const handleAddMediaFiles = useCallback(async () => {
+    const picked = await window.mycast.pickMediaFiles();
+    if (picked.length > 0) {
+      await enqueueVideoFiles(picked);
+    }
+  }, [enqueueVideoFiles]);
+
+  const attachSubtitleFromPath = useCallback(async (index: number, filePath: string) => {
+    const sub = await window.mycast.readSubtitleFile(filePath);
+    setMediaQueue((prev) =>
+      prev.map((item, idx) =>
+        idx === index
+          ? {
+              ...item,
+              subtitlePath: sub.path,
+              subtitleName: sub.name,
+              subtitleContent: sub.content,
+            }
+          : item
+      )
+    );
+  }, []);
+
+  const handleDropMediaPaths = useCallback(
+    async (filePaths: string[]) => {
+      const videoPaths: Array<{ path: string }> = [];
+      const subtitlePaths: string[] = [];
+
+      for (const filePath of filePaths) {
+        const ext = getFileExtension(filePath);
+        if (VIDEO_EXTENSIONS.has(ext)) {
+          videoPaths.push({ path: filePath });
+        } else if (SUBTITLE_EXTENSIONS.has(ext)) {
+          subtitlePaths.push(filePath);
+        }
+      }
+
+      if (videoPaths.length > 0) {
+        await enqueueVideoFiles(videoPaths);
+      }
+
+      if (subtitlePaths.length > 0) {
+        const targetIdx =
+          activeMediaIndexRef.current >= 0 ? activeMediaIndexRef.current : 0;
+        if (mediaQueueRef.current.length > 0 || videoPaths.length > 0) {
+          try {
+            await attachSubtitleFromPath(targetIdx, subtitlePaths[0]);
+          } catch (err) {
+            setSenderError(err instanceof Error ? err.message : 'Failed to read subtitle file');
+          }
+        }
+      }
+    },
+    [enqueueVideoFiles, attachSubtitleFromPath]
+  );
+
+  const handleAttachSubtitle = useCallback(async (index: number) => {
+    try {
+      const sub = await window.mycast.pickSubtitleFile();
+      if (!sub) return;
+      setMediaQueue((prev) =>
+        prev.map((item, idx) =>
+          idx === index
+            ? {
+                ...item,
+                subtitlePath: sub.path,
+                subtitleName: sub.name,
+                subtitleContent: sub.content,
+              }
+            : item
+        )
+      );
+    } catch (err) {
+      setSenderError(err instanceof Error ? err.message : 'Failed to load subtitle file');
+    }
+  }, []);
+
+  const handleClearSubtitle = useCallback((index: number) => {
+    setMediaQueue((prev) =>
+      prev.map((item, idx) =>
+        idx === index
+          ? {
+              ...item,
+              subtitlePath: undefined,
+              subtitleName: undefined,
+              subtitleContent: undefined,
+            }
+          : item
+      )
+    );
+  }, []);
+
+  const handleSelectQueueItem = useCallback(
+    (index: number) => {
+      selectAndPlayIndex(index, true);
+    },
+    [selectAndPlayIndex]
+  );
+
+  const handleMoveQueueItem = useCallback((index: number, direction: -1 | 1) => {
+    const target = index + direction;
+    setMediaQueue((prev) => {
+      if (target < 0 || target >= prev.length) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(index, 1);
+      next.splice(target, 0, moved);
+      return next;
+    });
+    setActiveMediaIndex((prevIdx) => {
+      if (prevIdx === index) return target;
+      if (prevIdx === target) return index;
+      return prevIdx;
+    });
+  }, []);
+
+  const handleRemoveQueueItem = useCallback(
+    (index: number) => {
+      const currentActive = activeMediaIndexRef.current;
+      const prevQueue = mediaQueueRef.current;
+      const nextQueue = prevQueue.filter((_, idx) => idx !== index);
+      setMediaQueue(nextQueue);
+
+      if (nextQueue.length === 0) {
+        setActiveMediaIndex(-1);
+        setMediaCurrentTime(0);
+        setMediaDuration(0);
+        setMediaIsPlaying(false);
+        setActiveSubtitleCue(null);
+        lastSentCueRef.current = null;
+        if (mediaVideoRef.current) {
+          mediaVideoRef.current.pause();
+          mediaVideoRef.current.removeAttribute('src');
+          mediaVideoRef.current.load();
+        }
+        if (castStateRef.current === 'casting' && castModeRef.current === 'media') {
+          senderRef.current?.stopCast(true, 'Queue cleared');
+        }
+        return;
+      }
+
+      if (index < currentActive) {
+        setActiveMediaIndex(currentActive - 1);
+      } else if (index === currentActive) {
+        const nextIdx = Math.min(index, nextQueue.length - 1);
+        const shouldPlay =
+          castStateRef.current === 'casting' && castModeRef.current === 'media';
+        setActiveMediaIndex(nextIdx);
+        loadMediaItem(nextQueue[nextIdx], shouldPlay).catch(() => {});
+      }
+    },
+    [loadMediaItem]
+  );
+
+  const handleClearQueue = useCallback(() => {
+    setMediaQueue([]);
+    setActiveMediaIndex(-1);
+    setMediaCurrentTime(0);
+    setMediaDuration(0);
+    setMediaIsPlaying(false);
+    setActiveSubtitleCue(null);
+    lastSentCueRef.current = null;
+    if (mediaVideoRef.current) {
+      mediaVideoRef.current.pause();
+      mediaVideoRef.current.removeAttribute('src');
+      mediaVideoRef.current.load();
+    }
+    if (castStateRef.current === 'casting' && castModeRef.current === 'media') {
+      senderRef.current?.stopCast(true, 'Queue cleared');
+    }
+  }, []);
+
+  const handleToggleMediaPlayPause = useCallback(async () => {
+    const video = mediaVideoRef.current;
+    const queue = mediaQueueRef.current;
+    if (!video || queue.length === 0) return;
+
+    const idx =
+      activeMediaIndexRef.current >= 0 && activeMediaIndexRef.current < queue.length
+        ? activeMediaIndexRef.current
+        : 0;
+    const item = queue[idx];
+
+    if (!video.src || video.src !== item.mediaUrl) {
+      await selectAndPlayIndex(idx, true);
+      return;
+    }
+
+    if (video.paused) {
+      await ensureAudioGraph();
+      await video.play().catch((err) => {
+        setSenderError(err instanceof Error ? err.message : 'Unable to play media');
+      });
+    } else {
+      video.pause();
+    }
+  }, [ensureAudioGraph, selectAndPlayIndex]);
+
+  const handleMediaSeek = useCallback(
+    (timeSec: number) => {
+      const video = mediaVideoRef.current;
+      if (!video) return;
+      const maxDur = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : timeSec;
+      const clamped = Math.max(0, Math.min(timeSec, maxDur));
+      video.currentTime = clamped;
+      setMediaCurrentTime(clamped);
+      syncSubtitleForTime(clamped);
+    },
+    [syncSubtitleForTime]
+  );
+
+  const handleMediaSkipBy = useCallback(
+    (deltaSec: number) => {
+      const video = mediaVideoRef.current;
+      if (!video) return;
+      handleMediaSeek((video.currentTime || 0) + deltaSec);
+    },
+    [handleMediaSeek]
+  );
+
+  const handlePrevTrack = useCallback(() => {
+    const video = mediaVideoRef.current;
+    const queue = mediaQueueRef.current;
+    if (queue.length === 0) return;
+
+    if (video && video.currentTime > 3) {
+      handleMediaSeek(0);
+      return;
+    }
+
+    const current = activeMediaIndexRef.current;
+    const prevIdx =
+      current > 0
+        ? current - 1
+        : mediaLoopModeRef.current === 'all'
+          ? queue.length - 1
+          : 0;
+    selectAndPlayIndex(prevIdx, true);
+  }, [handleMediaSeek, selectAndPlayIndex]);
+
+  const handleNextTrack = useCallback(() => {
+    const queue = mediaQueueRef.current;
+    if (queue.length === 0) return;
+    const nextIdx = computeNextIndex(activeMediaIndexRef.current, queue.length);
+    if (nextIdx >= 0) {
+      selectAndPlayIndex(nextIdx, true);
+    }
+  }, [computeNextIndex, selectAndPlayIndex]);
+
+  const handleChangePlaybackRate = useCallback((rate: number) => {
+    setMediaPlaybackRate(rate);
+    if (mediaVideoRef.current) {
+      mediaVideoRef.current.playbackRate = rate;
+    }
+  }, []);
+
+  const handleCycleLoopMode = useCallback(() => {
+    setMediaLoopMode((prev) => (prev === 'off' ? 'all' : prev === 'all' ? 'one' : 'off'));
+  }, []);
+
+  const handleToggleShuffle = useCallback(() => {
+    setMediaShuffle((prev) => !prev);
+  }, []);
+
+  const handleSavePlaylist = useCallback(async (name: string) => {
+    const queue = mediaQueueRef.current;
+    if (queue.length === 0) return;
+    const nextPlaylist: SavedPlaylist = {
+      id: crypto.randomUUID(),
+      name,
+      updatedAt: Date.now(),
+      items: queue.map((item) => ({
+        id: crypto.randomUUID(),
+        path: item.path,
+        name: item.name,
+        subtitlePath: item.subtitlePath,
+        subtitleName: item.subtitleName,
+      })),
+    };
+    const updated = await window.mycast.savePlaylists([
+      nextPlaylist,
+      ...savedPlaylists.filter((p) => p.name.toLowerCase() !== name.toLowerCase()),
+    ]);
+    setSavedPlaylists(updated);
+  }, [savedPlaylists]);
+
+  const handleLoadPlaylist = useCallback(
+    async (playlist: SavedPlaylist, mode: 'replace' | 'append') => {
+      const loadedItems: MediaQueueItem[] = [];
+      for (const plItem of playlist.items) {
+        let subtitleContent: string | undefined;
+        let subtitleName = plItem.subtitleName;
+        let subtitlePath = plItem.subtitlePath;
+        if (subtitlePath) {
+          try {
+            const sub = await window.mycast.readSubtitleFile(subtitlePath);
+            subtitleContent = sub.content;
+            subtitleName = sub.name;
+          } catch {
+            subtitlePath = undefined;
+            subtitleName = undefined;
+          }
+        }
+
+        try {
+          const mediaUrl = await window.mycast.registerMediaFile(plItem.path);
+          const meta = await probeMediaUrl(mediaUrl);
+          loadedItems.push({
+            id: crypto.randomUUID(),
+            path: plItem.path,
+            name: plItem.name,
+            size: 0,
+            mediaUrl,
+            duration: meta.duration,
+            width: meta.width,
+            height: meta.height,
+            thumbnailDataUrl: meta.thumbnailDataUrl,
+            subtitlePath,
+            subtitleName,
+            subtitleContent,
+          });
+        } catch (err) {
+          loadedItems.push({
+            id: crypto.randomUUID(),
+            path: plItem.path,
+            name: plItem.name,
+            size: 0,
+            mediaUrl: '',
+            duration: 0,
+            width: 0,
+            height: 0,
+            thumbnailDataUrl: null,
+            subtitlePath,
+            subtitleName,
+            subtitleContent,
+            error: err instanceof Error ? err.message : 'Media file missing',
+          });
+        }
+      }
+
+      if (mode === 'replace') {
+        setMediaQueue(loadedItems);
+        if (loadedItems.length > 0 && loadedItems[0].mediaUrl) {
+          setActiveMediaIndex(0);
+          const shouldPlay =
+            castStateRef.current === 'casting' && castModeRef.current === 'media';
+          await loadMediaItem(loadedItems[0], shouldPlay).catch(() => {});
+        } else {
+          setActiveMediaIndex(loadedItems.length > 0 ? 0 : -1);
+        }
+      } else {
+        const wasEmpty = mediaQueueRef.current.length === 0;
+        const startOffset = mediaQueueRef.current.length;
+        setMediaQueue((prev) => [...prev, ...loadedItems]);
+        if (wasEmpty && loadedItems.length > 0 && loadedItems[0].mediaUrl) {
+          setActiveMediaIndex(startOffset);
+          await loadMediaItem(loadedItems[0], false).catch(() => {});
+        }
+      }
+    },
+    [loadMediaItem]
+  );
+
+  const handleDeletePlaylist = useCallback(
+    async (playlistId: string) => {
+      const updated = await window.mycast.savePlaylists(
+        savedPlaylists.filter((p) => p.id !== playlistId)
+      );
+      setSavedPlaylists(updated);
+    },
+    [savedPlaylists]
+  );
 
   const handleStopCast = useCallback(() => {
     senderRef.current?.stopCast(true, 'Stopped by sender');
@@ -349,9 +1214,22 @@ export const App: React.FC = () => {
   }, [selfInfo]);
 
   const hideSidebar = isFullscreen && activeTab === 'receiver';
+  const showCrossTabCastBar =
+    castState === 'casting' &&
+    activeTab !== 'receiver' &&
+    ((castMode === 'screen' && activeTab !== 'cast') ||
+      (castMode === 'media' && activeTab !== 'media'));
 
   return (
     <div className="app-shell">
+      {/* Persistent hidden media element so playback survives tab switches */}
+      <video
+        ref={mediaVideoRef}
+        crossOrigin="anonymous"
+        playsInline
+        style={{ display: 'none' }}
+      />
+
       {!hideSidebar && (
         <Sidebar
           activeTab={activeTab}
@@ -360,11 +1238,72 @@ export const App: React.FC = () => {
           peerCount={peers.length}
           webReceiverCount={webReceivers.length}
           isCasting={castState === 'casting'}
+          castMode={castMode}
           isReceiving={Boolean(remoteStream)}
         />
       )}
 
       <main className="main-content">
+        {showCrossTabCastBar && (
+          <div className="active-cast-bar">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
+              <span className="status-dot busy" />
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: '13px', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {castMode === 'media'
+                    ? `Casting Media${activeMediaItem ? `: ${activeMediaItem.name}` : ''}`
+                    : 'Casting Screen'}
+                </div>
+                {senderStats && (
+                  <div style={{ fontSize: '11.5px', color: 'var(--text-secondary)' }}>
+                    {senderStats.width > 0 ? `${senderStats.width}×${senderStats.height}` : 'Live'} •{' '}
+                    {senderStats.fps}fps • {senderStats.bitrateMbps.toFixed(1)} Mbps
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              <button
+                className="btn btn-sm"
+                onClick={castMode === 'media' ? handleToggleMediaPlayPause : handleToggleVideoPaused}
+              >
+                {castMode === 'media' ? (
+                  mediaIsPlaying ? <Pause size={14} /> : <Play size={14} />
+                ) : videoPaused ? (
+                  <Play size={14} />
+                ) : (
+                  <Pause size={14} />
+                )}
+                <span>
+                  {castMode === 'media'
+                    ? mediaIsPlaying
+                      ? 'Pause'
+                      : 'Play'
+                    : videoPaused
+                      ? 'Resume'
+                      : 'Pause'}
+                </span>
+              </button>
+              <button className="btn btn-sm" onClick={handleToggleAudioMuted}>
+                {audioMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                <span>{audioMuted ? 'Unmute' : 'Mute'}</span>
+              </button>
+              <button
+                className="btn btn-sm"
+                onClick={() => setActiveTab(castMode === 'media' ? 'media' : 'cast')}
+              >
+                <ArrowUpRight size={14} />
+                <span>Controls</span>
+              </button>
+              <button className="btn btn-danger btn-sm" onClick={handleStopCast}>
+                <Square size={13} />
+                <span>Stop</span>
+              </button>
+            </div>
+          </div>
+        )}
+
         {activeTab === 'cast' && (
           <SenderView
             selfInfo={selfInfo}
@@ -378,10 +1317,16 @@ export const App: React.FC = () => {
             onChangeQuality={handleQualityChange}
             pinInput={pinInput}
             onChangePinInput={setPinInput}
-            castState={castState}
+            castState={
+              castMode === 'screen'
+                ? castState
+                : castState === 'connecting'
+                  ? 'connecting'
+                  : 'stopped'
+            }
             videoPaused={videoPaused}
             audioMuted={audioMuted}
-            stats={senderStats}
+            stats={castMode === 'screen' ? senderStats : null}
             warning={senderWarning}
             error={senderError}
             onDismissWarning={() => setSenderWarning(null)}
@@ -398,12 +1343,69 @@ export const App: React.FC = () => {
           />
         )}
 
+        {activeTab === 'media' && (
+          <MediaView
+            selfInfo={selfInfo}
+            peers={peers}
+            selectedPeerId={selectedPeerId}
+            onSelectPeer={setSelectedPeerId}
+            quality={quality}
+            onChangeQuality={handleQualityChange}
+            pinInput={pinInput}
+            onChangePinInput={setPinInput}
+            castState={castState}
+            castMode={castMode}
+            audioMuted={audioMuted}
+            stats={senderStats}
+            warning={senderWarning}
+            error={senderError}
+            onDismissWarning={() => setSenderWarning(null)}
+            onDismissError={() => setSenderError(null)}
+            onRefreshPeers={() => window.mycast.refreshDiscovery()}
+            onAddManualPeer={handleAddManualPeer}
+            onRemoveManualPeer={handleRemoveManualPeer}
+            queue={mediaQueue}
+            activeIndex={activeMediaIndex}
+            isPlaying={mediaIsPlaying}
+            currentTime={mediaCurrentTime}
+            duration={mediaDuration}
+            playbackRate={mediaPlaybackRate}
+            loopMode={mediaLoopMode}
+            shuffle={mediaShuffle}
+            activeSubtitleCue={activeSubtitleCue}
+            savedPlaylists={savedPlaylists}
+            onAddFiles={handleAddMediaFiles}
+            onDropPaths={handleDropMediaPaths}
+            onSelectQueueItem={handleSelectQueueItem}
+            onMoveQueueItem={handleMoveQueueItem}
+            onRemoveQueueItem={handleRemoveQueueItem}
+            onClearQueue={handleClearQueue}
+            onAttachSubtitle={handleAttachSubtitle}
+            onClearSubtitle={handleClearSubtitle}
+            onTogglePlayPause={handleToggleMediaPlayPause}
+            onSeek={handleMediaSeek}
+            onSkipBy={handleMediaSkipBy}
+            onPrevTrack={handlePrevTrack}
+            onNextTrack={handleNextTrack}
+            onChangePlaybackRate={handleChangePlaybackRate}
+            onCycleLoopMode={handleCycleLoopMode}
+            onToggleShuffle={handleToggleShuffle}
+            onToggleAudioMuted={handleToggleAudioMuted}
+            onStartMediaCast={handleStartMediaCast}
+            onStopCast={handleStopCast}
+            onSavePlaylist={handleSavePlaylist}
+            onLoadPlaylist={handleLoadPlaylist}
+            onDeletePlaylist={handleDeletePlaylist}
+          />
+        )}
+
         {activeTab === 'receiver' && (
           <ReceiverView
             selfInfo={selfInfo}
             stream={remoteStream}
             senderName={receiverSenderName}
             stats={receiverStats}
+            subtitleText={receiverSubtitleText}
             displays={displays}
             targetDisplayId={config?.targetDisplayId ?? null}
             isFullscreen={isFullscreen}

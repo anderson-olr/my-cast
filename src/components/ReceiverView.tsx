@@ -1,23 +1,32 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
+  Camera,
   Cast,
+  CircleDot,
+  FolderOpen,
   Info,
   Lock,
   Maximize,
   Minimize,
   Monitor,
   PhoneOff,
+  Square,
+  Subtitles,
   Volume2,
   VolumeX,
+  X,
 } from 'lucide-react';
-import { DisplayInfo, SelfInfo, StreamStats } from '../types/mycast';
+import { DisplayInfo, SavedFileResult, SelfInfo, StreamStats } from '../types/mycast';
+import { captureVideoScreenshot, ReceiverRecorder } from '../services/receiverRecorder';
+import { formatDuration } from '../utils/mediaMetadata';
 
 interface ReceiverViewProps {
   selfInfo: SelfInfo | null;
   stream: MediaStream | null;
   senderName: string;
   stats: StreamStats | null;
+  subtitleText?: string | null;
   displays: DisplayInfo[];
   targetDisplayId: number | null;
   isFullscreen: boolean;
@@ -27,11 +36,18 @@ interface ReceiverViewProps {
   onExitToCast: () => void;
 }
 
+interface SaveToastState {
+  fileName: string;
+  filePath: string;
+  error?: boolean;
+}
+
 export const ReceiverView: React.FC<ReceiverViewProps> = ({
   selfInfo,
   stream,
   senderName,
   stats,
+  subtitleText = null,
   displays,
   targetDisplayId,
   isFullscreen,
@@ -42,6 +58,10 @@ export const ReceiverView: React.FC<ReceiverViewProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hudTimerRef = useRef<number | null>(null);
+  const recorderRef = useRef<ReceiverRecorder | null>(null);
+  const recTimerRef = useRef<number | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+  const mountedRef = useRef(true);
 
   const [now, setNow] = useState(() => new Date());
   const [hudVisible, setHudVisible] = useState(true);
@@ -49,6 +69,102 @@ export const ReceiverView: React.FC<ReceiverViewProps> = ({
   const [volume, setVolume] = useState(1);
   const [fillMode, setFillMode] = useState(false);
   const [showStats, setShowStats] = useState(false);
+  const [subtitlesEnabled, setSubtitlesEnabled] = useState(true);
+  const [hasReceivedSubtitles, setHasReceivedSubtitles] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [saveToast, setSaveToast] = useState<SaveToastState | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const showToast = useCallback((toast: SaveToastState) => {
+    if (!mountedRef.current) return;
+    setSaveToast(toast);
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      if (mountedRef.current) {
+        setSaveToast(null);
+      }
+    }, 5000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (subtitleText) {
+      setHasReceivedSubtitles(true);
+    }
+  }, [subtitleText]);
+
+  useEffect(() => {
+    if (!stream) {
+      setHasReceivedSubtitles(false);
+    }
+  }, [stream]);
+
+  const stopRecordingInternal = useCallback(async () => {
+    if (recTimerRef.current) {
+      window.clearInterval(recTimerRef.current);
+      recTimerRef.current = null;
+    }
+    const recorder = recorderRef.current;
+    if (!recorder || !recorder.isRecording()) {
+      if (mountedRef.current) {
+        setIsRecording(false);
+        setRecordingSeconds(0);
+      }
+      return;
+    }
+    recorderRef.current = null;
+    try {
+      const saved: SavedFileResult | null = await recorder.stop();
+      if (mountedRef.current) {
+        setIsRecording(false);
+        setRecordingSeconds(0);
+      }
+      if (saved) {
+        showToast({ fileName: saved.fileName, filePath: saved.filePath });
+      }
+    } catch (err) {
+      if (mountedRef.current) {
+        setIsRecording(false);
+        setRecordingSeconds(0);
+      }
+      showToast({
+        fileName: err instanceof Error ? err.message : 'Failed to save recording',
+        filePath: '',
+        error: true,
+      });
+    }
+  }, [showToast]);
+
+  // Auto-stop and save any active recording when stream ends or component unmounts
+  useEffect(() => {
+    if (!stream) {
+      stopRecordingInternal();
+    }
+    return () => {
+      if (recorderRef.current?.isRecording()) {
+        recorderRef.current.stop().catch(() => {});
+        recorderRef.current = null;
+      }
+      if (recTimerRef.current) {
+        window.clearInterval(recTimerRef.current);
+        recTimerRef.current = null;
+      }
+    };
+  }, [stream, stopRecordingInternal]);
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(new Date()), 1000);
@@ -102,6 +218,63 @@ export const ReceiverView: React.FC<ReceiverViewProps> = ({
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [onToggleFullscreen]);
+
+  const handleScreenshot = useCallback(async () => {
+    const video = videoRef.current;
+    if (!video || !stream) return;
+    try {
+      const saved = await captureVideoScreenshot(video, senderName);
+      showToast({ fileName: saved.fileName, filePath: saved.filePath });
+    } catch (err) {
+      showToast({
+        fileName: err instanceof Error ? err.message : 'Screenshot failed',
+        filePath: '',
+        error: true,
+      });
+    }
+  }, [stream, senderName, showToast]);
+
+  const handleToggleRecording = useCallback(async () => {
+    if (!stream) return;
+    if (isRecording) {
+      await stopRecordingInternal();
+      return;
+    }
+
+    const recorder = new ReceiverRecorder();
+    recorderRef.current = recorder;
+    try {
+      await recorder.start(stream, senderName, (saved) => {
+        if (recTimerRef.current) {
+          window.clearInterval(recTimerRef.current);
+          recTimerRef.current = null;
+        }
+        recorderRef.current = null;
+        if (mountedRef.current) {
+          setIsRecording(false);
+          setRecordingSeconds(0);
+          showToast({ fileName: saved.fileName, filePath: saved.filePath });
+        }
+      });
+
+      if (mountedRef.current) {
+        setIsRecording(true);
+        setRecordingSeconds(0);
+      }
+      recTimerRef.current = window.setInterval(() => {
+        if (mountedRef.current) {
+          setRecordingSeconds((s) => s + 1);
+        }
+      }, 1000);
+    } catch (err) {
+      recorderRef.current = null;
+      showToast({
+        fileName: err instanceof Error ? err.message : 'Failed to start recording',
+        filePath: '',
+        error: true,
+      });
+    }
+  }, [stream, isRecording, senderName, stopRecordingInternal, showToast]);
 
   const timeString = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const dateString = now.toLocaleDateString([], {
@@ -211,6 +384,17 @@ export const ReceiverView: React.FC<ReceiverViewProps> = ({
             </div>
           )}
 
+          {isRecording && (
+            <div className="rec-badge">
+              <span className="rec-dot" />
+              <span>REC {formatDuration(recordingSeconds)}</span>
+            </div>
+          )}
+
+          {subtitlesEnabled && subtitleText && (
+            <div className="subtitle-overlay">{subtitleText}</div>
+          )}
+
           <div className={`receiver-hud ${hudVisible ? '' : 'hidden'}`}>
             <div className="live-indicator">
               <span className="live-dot" />
@@ -267,6 +451,35 @@ export const ReceiverView: React.FC<ReceiverViewProps> = ({
               </div>
             )}
 
+            {hasReceivedSubtitles && (
+              <button
+                className={`btn btn-sm ${subtitlesEnabled ? 'btn-primary' : ''}`}
+                onClick={() => setSubtitlesEnabled((s) => !s)}
+                title={subtitlesEnabled ? 'Hide Subtitles' : 'Show Subtitles'}
+              >
+                <Subtitles size={14} />
+                <span>{subtitlesEnabled ? 'CC On' : 'CC Off'}</span>
+              </button>
+            )}
+
+            <button
+              className="btn btn-sm"
+              onClick={handleScreenshot}
+              title="Save PNG Screenshot"
+            >
+              <Camera size={14} />
+              <span>Screenshot</span>
+            </button>
+
+            <button
+              className={`btn btn-sm ${isRecording ? 'btn-danger' : ''}`}
+              onClick={handleToggleRecording}
+              title={isRecording ? 'Stop Recording' : 'Start Recording (.webm)'}
+            >
+              {isRecording ? <Square size={13} /> : <CircleDot size={14} color="#f87171" />}
+              <span>{isRecording ? `Stop (${formatDuration(recordingSeconds)})` : 'Record'}</span>
+            </button>
+
             <button
               className={`btn btn-sm ${showStats ? 'btn-primary' : ''}`}
               onClick={() => setShowStats((s) => !s)}
@@ -287,6 +500,32 @@ export const ReceiverView: React.FC<ReceiverViewProps> = ({
             </button>
           </div>
         </>
+      )}
+
+      {saveToast && (
+        <div className={`save-toast ${saveToast.error ? 'error' : ''}`}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: '12.5px', fontWeight: 600 }}>
+              {saveToast.error ? saveToast.fileName : `Saved ${saveToast.fileName}`}
+            </div>
+          </div>
+          {!saveToast.error && saveToast.filePath && (
+            <button
+              className="btn btn-sm"
+              onClick={() => window.mycast.openFolder(saveToast.filePath).catch(() => {})}
+            >
+              <FolderOpen size={13} />
+              <span>Open Folder</span>
+            </button>
+          )}
+          <button
+            className="btn btn-ghost btn-sm"
+            style={{ padding: '4px' }}
+            onClick={() => setSaveToast(null)}
+          >
+            <X size={13} />
+          </button>
+        </div>
       )}
     </div>
   );

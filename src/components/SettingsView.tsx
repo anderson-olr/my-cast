@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Check, Lock, Monitor, RefreshCw, Shield } from 'lucide-react';
+import { Camera, Check, FolderOpen, Lock, Monitor, RefreshCw, Shield } from 'lucide-react';
 import { AppConfig, DisplayInfo } from '../types/mycast';
 
 interface SettingsViewProps {
@@ -30,6 +30,33 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setSavedNotice(true);
     window.setTimeout(() => setSavedNotice(false), 1800);
   };
+
+  const handlePickDirectory = async (field: 'recordingsDir' | 'screenshotsDir') => {
+    const picked = await window.mycast.pickDirectory(config[field]);
+    if (picked) {
+      await onUpdateConfig({ [field]: picked });
+    }
+  };
+
+  const folderEntries: Array<{
+    field: 'recordingsDir' | 'screenshotsDir';
+    title: string;
+    description: string;
+    value: string;
+  }> = [
+    {
+      field: 'recordingsDir',
+      title: 'Recordings Folder (.webm)',
+      description: 'Where receiver stream recordings are automatically saved.',
+      value: config.recordingsDir,
+    },
+    {
+      field: 'screenshotsDir',
+      title: 'Screenshots Folder (.png)',
+      description: 'Where instant receiver snapshots are saved.',
+      value: config.screenshotsDir,
+    },
+  ];
 
   return (
     <div className="scroll-view">
@@ -203,6 +230,57 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <span className="switch-knob" />
           </button>
         </div>
+      </section>
+
+      {/* Recordings & Screenshots */}
+      <section className="section-card">
+        <div className="section-title-group">
+          <Camera size={18} color="#34d399" />
+          <h2 className="section-title">Recordings &amp; Screenshots</h2>
+        </div>
+
+        {folderEntries.map((entry) => (
+          <div key={entry.field} className="toggle-row" style={{ flexWrap: 'wrap' }}>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: '14px', fontWeight: 600 }}>{entry.title}</div>
+              <div style={{ fontSize: '12.5px', color: 'var(--text-secondary)', marginTop: '3px' }}>
+                {entry.description}
+              </div>
+              <div
+                className="meta-line"
+                style={{
+                  marginTop: '6px',
+                  padding: '6px 10px',
+                  borderRadius: '8px',
+                  background: 'rgba(7, 10, 18, 0.55)',
+                  border: '1px solid var(--border-subtle)',
+                  display: 'inline-block',
+                  maxWidth: '100%',
+                }}
+              >
+                {entry.value || 'Default folder'}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => handlePickDirectory(entry.field)}
+              >
+                <FolderOpen size={14} />
+                <span>Change Folder</span>
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => window.mycast.openFolder(entry.value).catch(() => {})}
+              >
+                <span>Open Folder</span>
+              </button>
+            </div>
+          </div>
+        ))}
       </section>
     </div>
   );

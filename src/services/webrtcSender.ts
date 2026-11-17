@@ -106,11 +106,17 @@ export class WebRtcSenderController {
   private prevBytes = 0;
   private prevTs = 0;
   private isStopping = false;
+  private castMode: 'screen' | 'media' = 'screen';
+  private ownsStreamTracks = true;
 
   private readonly callbacks: SenderCallbacks;
 
   constructor(callbacks: SenderCallbacks) {
     this.callbacks = callbacks;
+  }
+
+  public getCastMode(): 'screen' | 'media' {
+    return this.castMode;
   }
 
   public async startCast(params: {
@@ -124,6 +130,8 @@ export class WebRtcSenderController {
   }): Promise<{ audioActive: boolean }> {
     await this.stopCast(false);
     this.isStopping = false;
+    this.castMode = 'screen';
+    this.ownsStreamTracks = true;
 
     const { target, sourceId, quality, selfId, selfName, selfPort, pin } = params;
     this.currentQuality = { ...quality };
@@ -159,11 +167,7 @@ export class WebRtcSenderController {
     }
 
     // 2. Open WebSocket signaling connection
-    const wsUrl = target.isWebReceiver && target.webClientId
-      ? `ws://127.0.0.1:${selfPort}/ws?role=sender&targetClientId=${encodeURIComponent(target.webClientId)}`
-      : target.isLoopback
-        ? `ws://127.0.0.1:${selfPort}/ws?role=sender`
-        : `ws://${target.ip}:${target.port}/ws?role=sender`;
+    const wsUrl = this.buildWsUrl(target, selfPort);
 
     try {
       await this.connectAndNegotiate({
@@ -182,6 +186,89 @@ export class WebRtcSenderController {
       this.callbacks.onStateChange('stopped');
       throw err;
     }
+  }
+
+  public async startMediaCast(params: {
+    target: DiscoveredPeer;
+    stream: MediaStream;
+    quality: QualityPreset;
+    selfId: string;
+    selfName: string;
+    selfPort: number;
+    pin?: string;
+  }): Promise<void> {
+    await this.stopCast(false);
+    this.isStopping = false;
+    this.castMode = 'media';
+    this.ownsStreamTracks = false;
+
+    const { target, stream, quality, selfId, selfName, selfPort, pin } = params;
+    this.currentQuality = { ...quality };
+    this.currentSourceId = null;
+    this.sessionId = crypto.randomUUID();
+    this.localStream = stream;
+
+    const videoTrack = this.localStream.getVideoTracks()[0];
+    if (videoTrack) {
+      videoTrack.contentHint = 'motion';
+    }
+
+    this.callbacks.onStateChange('connecting', `Connecting to ${target.name}...`);
+
+    const wsUrl = this.buildWsUrl(target, selfPort);
+    try {
+      await this.connectAndNegotiate({
+        wsUrl,
+        sessionId: this.sessionId,
+        senderId: selfId,
+        senderName: selfName,
+        pin,
+        quality,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Media cast connection failed';
+      await this.stopCast(false);
+      this.callbacks.onError(msg);
+      this.callbacks.onStateChange('stopped');
+      throw err;
+    }
+  }
+
+  public async replaceMediaVideoTrack(newVideoTrack: MediaStreamTrack | null): Promise<void> {
+    if (newVideoTrack) {
+      newVideoTrack.contentHint = 'motion';
+    }
+    if (this.localStream) {
+      for (const track of this.localStream.getVideoTracks()) {
+        this.localStream.removeTrack(track);
+      }
+      if (newVideoTrack) {
+        this.localStream.addTrack(newVideoTrack);
+      }
+    }
+    if (this.videoSender) {
+      await this.videoSender.replaceTrack(newVideoTrack);
+    }
+  }
+
+  public sendSubtitleCue(subtitleText: string | null): void {
+    if (this.sessionId && this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.sendWs({
+        type: 'subtitle-cue',
+        sessionId: this.sessionId,
+        subtitleText,
+      });
+    }
+  }
+
+  private buildWsUrl(target: DiscoveredPeer, selfPort: number): string {
+    if (target.isWebReceiver && target.webClientId) {
+      return `ws://127.0.0.1:${selfPort}/ws?role=sender&targetClientId=${encodeURIComponent(target.webClientId)}`;
+    }
+    if (target.isLoopback) {
+      return `ws://127.0.0.1:${selfPort}/ws?role=sender`;
+    }
+    return `ws://${target.ip}:${target.port}/ws?role=sender`;
   }
 
   private connectAndNegotiate(opts: {
@@ -584,7 +671,9 @@ export class WebRtcSenderController {
     if (this.localStream) {
       for (const track of this.localStream.getTracks()) {
         track.onended = null;
-        track.stop();
+        if (this.ownsStreamTracks) {
+          track.stop();
+        }
       }
       this.localStream = null;
     }
